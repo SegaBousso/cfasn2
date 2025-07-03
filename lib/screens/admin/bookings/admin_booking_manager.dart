@@ -1,113 +1,154 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../../models/booking_model.dart';
+import '../services/admin_firebase_manager.dart';
+import '../utils/admin_cache_manager.dart';
 
+/// Gestionnaire des réservations pour l'administration
+/// Utilise l'architecture unifiée avec cache et Firebase manager
 class AdminBookingManager {
-  static final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  static const String _collection = 'bookings';
+  static final AdminBookingManager _instance = AdminBookingManager._internal();
+  factory AdminBookingManager() => _instance;
+  AdminBookingManager._internal();
 
-  // Cache pour optimiser les performances
-  static List<BookingModel>? _cachedBookings;
-  static DateTime? _lastCacheUpdate;
-  static const Duration _cacheTimeout = Duration(minutes: 5);
+  final AdminFirebaseManager _firebase = AdminFirebaseManager();
+  final AdminCacheManager _cache = AdminCacheManager();
+  final String _collectionName = 'bookings';
 
-  // Stream pour les mises à jour en temps réel
-  static Stream<List<BookingModel>> getBookingsStream() {
-    return _firestore
-        .collection(_collection)
-        .orderBy('createdAt', descending: true)
-        .snapshots()
-        .map(
-          (snapshot) => snapshot.docs
-              .map((doc) => BookingModel.fromFirestore(doc))
-              .toList(),
-        );
+  /// Stream pour les mises à jour en temps réel des réservations
+  Stream<List<BookingModel>> getBookingsStream({
+    BookingStatus? statusFilter,
+    int? limit,
+  }) {
+    final filters = <QueryFilter>[];
+
+    if (statusFilter != null) {
+      filters.add(
+        QueryFilter(
+          field: 'status',
+          operator: FilterOperator.isEqualTo,
+          value: statusFilter.name,
+        ),
+      );
+    }
+
+    return _firebase
+        .createDocumentsStream(
+          _collectionName,
+          filters: filters,
+          sorts: [QuerySort(field: 'createdAt', descending: true)],
+          limit: limit,
+          streamKey: 'bookings_stream',
+        )
+        .map((docs) {
+          return docs.map((doc) => BookingModel.fromFirestore(doc)).toList();
+        });
   }
 
-  // Récupérer toutes les réservations avec pagination
-  static Future<List<BookingModel>> getAllBookings({
-    int limit = 50,
+  /// Récupère toutes les réservations avec filtres et pagination
+  Future<List<BookingModel>> getAllBookings({
+    int? limit,
     DocumentSnapshot? startAfter,
     BookingStatus? statusFilter,
     String? searchQuery,
     DateTime? startDate,
     DateTime? endDate,
   }) async {
+    // Construire la clé de cache
+    final cacheKey =
+        'bookings_filtered_${statusFilter}_${searchQuery}_${startDate}_${endDate}_${limit}';
+    final cached = _cache.get<List<BookingModel>>(cacheKey);
+    if (cached != null) return cached;
+
+    // Construire les filtres
+    final filters = <QueryFilter>[];
+
+    if (statusFilter != null) {
+      filters.add(
+        QueryFilter(
+          field: 'status',
+          operator: FilterOperator.isEqualTo,
+          value: statusFilter.name,
+        ),
+      );
+    }
+
+    if (startDate != null) {
+      filters.add(
+        QueryFilter(
+          field: 'serviceDate',
+          operator: FilterOperator.isGreaterThanOrEqualTo,
+          value: Timestamp.fromDate(startDate),
+        ),
+      );
+    }
+
+    if (endDate != null) {
+      filters.add(
+        QueryFilter(
+          field: 'serviceDate',
+          operator: FilterOperator.isLessThanOrEqualTo,
+          value: Timestamp.fromDate(endDate),
+        ),
+      );
+    }
+
+    final docs = await _firebase.getDocuments(
+      _collectionName,
+      filters: filters,
+      sorts: [QuerySort(field: 'createdAt', descending: true)],
+      limit: limit,
+      startAfter: startAfter,
+      cacheKey: cacheKey,
+    );
+
+    final bookings = docs
+        .map((doc) => BookingModel.fromFirestore(doc))
+        .toList();
+
+    // Si une recherche textuelle est demandée, filtrer localement
+    if (searchQuery != null && searchQuery.isNotEmpty) {
+      final query = searchQuery.toLowerCase();
+      return bookings.where((booking) {
+        return booking.service.name.toLowerCase().contains(query) ||
+            booking.userName.toLowerCase().contains(query) ||
+            (booking.providerName?.toLowerCase().contains(query) ?? false);
+      }).toList();
+    }
+
+    return bookings;
+  }
+
+  /// Récupère une réservation par ID
+  Future<BookingModel?> getBookingById(String id) async {
+    final cacheKey = AdminCacheKeys.bookingById(id);
+    final cached = _cache.get<BookingModel>(cacheKey);
+    if (cached != null) return cached;
+
     try {
-      Query query = _firestore.collection(_collection);
+      final doc = await FirebaseFirestore.instance
+          .collection(_collectionName)
+          .doc(id)
+          .get();
 
-      // Filtres
-      if (statusFilter != null) {
-        query = query.where('status', isEqualTo: statusFilter.name);
-      }
+      if (!doc.exists) return null;
 
-      if (startDate != null && endDate != null) {
-        query = query
-            .where('serviceDate', isGreaterThanOrEqualTo: startDate)
-            .where('serviceDate', isLessThanOrEqualTo: endDate);
-      }
-
-      // Tri et pagination
-      query = query.orderBy('createdAt', descending: true);
-
-      if (startAfter != null) {
-        query = query.startAfterDocument(startAfter);
-      }
-
-      query = query.limit(limit);
-
-      final snapshot = await query.get();
-      List<BookingModel> bookings = snapshot.docs
-          .map((doc) => BookingModel.fromFirestore(doc))
-          .toList();
-
-      // Filtrer par recherche textuelle si nécessaire
-      if (searchQuery != null && searchQuery.isNotEmpty) {
-        bookings = bookings.where((booking) {
-          return booking.userName.toLowerCase().contains(
-                searchQuery.toLowerCase(),
-              ) ||
-              booking.userEmail.toLowerCase().contains(
-                searchQuery.toLowerCase(),
-              ) ||
-              booking.service.name.toLowerCase().contains(
-                searchQuery.toLowerCase(),
-              ) ||
-              (booking.providerName?.toLowerCase().contains(
-                    searchQuery.toLowerCase(),
-                  ) ??
-                  false);
-        }).toList();
-      }
-
-      return bookings;
+      final booking = BookingModel.fromFirestore(doc);
+      _cache.set(cacheKey, booking);
+      return booking;
     } catch (e) {
-      print('Erreur lors de la récupération des réservations: $e');
-      return [];
+      print('❌ Erreur lors de la récupération de la réservation: $e');
+      return null;
     }
   }
 
-  // Récupérer une réservation par ID
-  static Future<BookingModel?> getBookingById(String id) async {
-    try {
-      final doc = await _firestore.collection(_collection).doc(id).get();
-      if (doc.exists) {
-        return BookingModel.fromFirestore(doc);
-      }
-      return null;
-    } catch (e) {
-      print('Erreur lors de la récupération de la réservation: $e');
-      return null;
-    }
-  }
-
-  // Mettre à jour le statut d'une réservation
-  static Future<bool> updateBookingStatus(
+  /// Met à jour le statut d'une réservation
+  Future<bool> updateBookingStatus(
     String bookingId,
     BookingStatus newStatus, {
     String? reason,
   }) async {
     try {
-      final updateData = {
+      final updateData = <String, dynamic>{
         'status': newStatus.name,
         'updatedAt': FieldValue.serverTimestamp(),
       };
@@ -117,158 +158,279 @@ class AdminBookingManager {
         updateData['cancelledAt'] = FieldValue.serverTimestamp();
       }
 
-      await _firestore
-          .collection(_collection)
-          .doc(bookingId)
-          .update(updateData);
+      final docRef = FirebaseFirestore.instance
+          .collection(_collectionName)
+          .doc(bookingId);
+
+      final operation = BatchOperation.update(docRef, updateData);
+      await _firebase.executeBatch([operation]);
 
       // Invalider le cache
-      _invalidateCache();
+      _cache.clearByPrefix('bookings_');
 
+      print('✅ Statut de réservation mis à jour avec succès');
       return true;
     } catch (e) {
-      print('Erreur lors de la mise à jour du statut: $e');
+      print('❌ Erreur lors de la mise à jour du statut: $e');
       return false;
     }
   }
 
-  // Mettre à jour le statut de paiement
-  static Future<bool> updatePaymentStatus(
+  /// Met à jour le statut de paiement
+  Future<bool> updatePaymentStatus(
     String bookingId,
     PaymentStatus newStatus,
   ) async {
     try {
-      await _firestore.collection(_collection).doc(bookingId).update({
+      final docRef = FirebaseFirestore.instance
+          .collection(_collectionName)
+          .doc(bookingId);
+
+      final operation = BatchOperation.update(docRef, {
         'paymentStatus': newStatus.name,
         'updatedAt': FieldValue.serverTimestamp(),
       });
 
-      _invalidateCache();
+      await _firebase.executeBatch([operation]);
+
+      // Invalider le cache
+      _cache.clearByPrefix('bookings_');
+
+      print('✅ Statut de paiement mis à jour avec succès');
       return true;
     } catch (e) {
-      print('Erreur lors de la mise à jour du paiement: $e');
+      print('❌ Erreur lors de la mise à jour du paiement: $e');
       return false;
     }
   }
 
-  // Assigner un prestataire à une réservation
-  static Future<bool> assignProvider(
+  /// Assigne un prestataire à une réservation
+  Future<bool> assignProvider(
     String bookingId,
     String providerId,
     String providerName,
   ) async {
     try {
-      await _firestore.collection(_collection).doc(bookingId).update({
+      final docRef = FirebaseFirestore.instance
+          .collection(_collectionName)
+          .doc(bookingId);
+
+      final operation = BatchOperation.update(docRef, {
         'providerId': providerId,
         'providerName': providerName,
         'status': BookingStatus.confirmed.name,
         'updatedAt': FieldValue.serverTimestamp(),
       });
 
-      _invalidateCache();
+      await _firebase.executeBatch([operation]);
+
+      // Invalider le cache
+      _cache.clearByPrefix('bookings_');
+
+      print('✅ Prestataire assigné avec succès');
       return true;
     } catch (e) {
-      print('Erreur lors de l\'assignation du prestataire: $e');
+      print('❌ Erreur lors de l\'assignation du prestataire: $e');
       return false;
     }
   }
 
-  // Supprimer une réservation (admin seulement)
-  static Future<bool> deleteBooking(String bookingId) async {
+  /// Supprime une réservation (admin seulement)
+  Future<bool> deleteBooking(String bookingId) async {
     try {
-      await _firestore.collection(_collection).doc(bookingId).delete();
-      _invalidateCache();
+      final docRef = FirebaseFirestore.instance
+          .collection(_collectionName)
+          .doc(bookingId);
+
+      final operation = BatchOperation.delete(docRef);
+      await _firebase.executeBatch([operation]);
+
+      // Invalider le cache
+      _cache.clearByPrefix('bookings_');
+
+      print('✅ Réservation supprimée avec succès');
       return true;
     } catch (e) {
-      print('Erreur lors de la suppression de la réservation: $e');
+      print('❌ Erreur lors de la suppression de la réservation: $e');
       return false;
     }
   }
 
-  // Actions en lot
-  static Future<bool> bulkUpdateStatus(
+  /// Actions en lot pour le statut
+  Future<bool> bulkUpdateStatus(
     List<String> bookingIds,
     BookingStatus newStatus,
   ) async {
     try {
-      final batch = _firestore.batch();
-
-      for (String id in bookingIds) {
-        final docRef = _firestore.collection(_collection).doc(id);
-        batch.update(docRef, {
+      final operations = bookingIds.map((id) {
+        final docRef = FirebaseFirestore.instance
+            .collection(_collectionName)
+            .doc(id);
+        return BatchOperation.update(docRef, {
           'status': newStatus.name,
           'updatedAt': FieldValue.serverTimestamp(),
         });
-      }
+      }).toList();
 
-      await batch.commit();
-      _invalidateCache();
+      await _firebase.executeBatch(operations);
+
+      // Invalider le cache
+      _cache.clearByPrefix('bookings_');
+
+      print('✅ ${bookingIds.length} réservations mises à jour avec succès');
       return true;
     } catch (e) {
-      print('Erreur lors de la mise à jour en lot: $e');
+      print('❌ Erreur lors de la mise à jour en lot: $e');
       return false;
     }
   }
 
-  // Statistiques des réservations
-  static Future<Map<String, dynamic>> getBookingStats() async {
+  /// Supprime plusieurs réservations
+  Future<bool> bulkDeleteBookings(List<String> bookingIds) async {
     try {
-      final snapshot = await _firestore.collection(_collection).get();
-      final bookings = snapshot.docs
-          .map((doc) => BookingModel.fromFirestore(doc))
-          .toList();
+      final operations = bookingIds.map((id) {
+        final docRef = FirebaseFirestore.instance
+            .collection(_collectionName)
+            .doc(id);
+        return BatchOperation.delete(docRef);
+      }).toList();
 
-      // Stats par statut
-      final statusCounts = <String, int>{};
-      for (BookingStatus status in BookingStatus.values) {
-        statusCounts[status.label] = bookings
-            .where((b) => b.status == status)
-            .length;
-      }
+      await _firebase.executeBatch(operations);
 
-      // Revenue total
-      final totalRevenue = bookings
-          .where((b) => b.status == BookingStatus.completed)
-          .fold(0.0, (sum, booking) => sum + booking.totalAmount);
+      // Invalider le cache
+      _cache.clearByPrefix('bookings_');
 
-      // Stats mensuelles
+      print('✅ ${bookingIds.length} réservations supprimées avec succès');
+      return true;
+    } catch (e) {
+      print('❌ Erreur lors de la suppression en lot: $e');
+      return false;
+    }
+  }
+
+  /// Obtient les statistiques des réservations
+  Future<Map<String, dynamic>> getBookingStats() async {
+    const cacheKey = 'bookings_stats';
+    final cached = _cache.get<Map<String, dynamic>>(cacheKey);
+    if (cached != null) return cached;
+
+    try {
+      // Utiliser le service de statistiques pour des calculs optimisés
+      final results = await Future.wait([
+        _firebase.countDocuments(
+          _collectionName,
+          cacheKey: 'bookings_count_total',
+        ),
+        _firebase.countDocuments(
+          _collectionName,
+          filters: [
+            QueryFilter(
+              field: 'status',
+              operator: FilterOperator.isEqualTo,
+              value: BookingStatus.pending.name,
+            ),
+          ],
+          cacheKey: 'bookings_count_pending',
+        ),
+        _firebase.countDocuments(
+          _collectionName,
+          filters: [
+            QueryFilter(
+              field: 'status',
+              operator: FilterOperator.isEqualTo,
+              value: BookingStatus.confirmed.name,
+            ),
+          ],
+          cacheKey: 'bookings_count_confirmed',
+        ),
+        _firebase.countDocuments(
+          _collectionName,
+          filters: [
+            QueryFilter(
+              field: 'status',
+              operator: FilterOperator.isEqualTo,
+              value: BookingStatus.completed.name,
+            ),
+          ],
+          cacheKey: 'bookings_count_completed',
+        ),
+        _firebase.countDocuments(
+          _collectionName,
+          filters: [
+            QueryFilter(
+              field: 'status',
+              operator: FilterOperator.isEqualTo,
+              value: BookingStatus.cancelled.name,
+            ),
+          ],
+          cacheKey: 'bookings_count_cancelled',
+        ),
+      ]);
+
+      // Calculer la croissance mensuelle
       final now = DateTime.now();
-      final thisMonth = bookings
-          .where(
-            (b) =>
-                b.createdAt.year == now.year && b.createdAt.month == now.month,
-          )
-          .length;
+      final thisMonthStart = DateTime(now.year, now.month, 1);
+      final lastMonthStart = DateTime(now.year, now.month - 1, 1);
+      final lastMonthEnd = DateTime(now.year, now.month, 0, 23, 59, 59);
 
-      final lastMonth = bookings.where((b) {
-        final lastMonthDate = DateTime(now.year, now.month - 1);
-        return b.createdAt.year == lastMonthDate.year &&
-            b.createdAt.month == lastMonthDate.month;
-      }).length;
+      final monthlyResults = await Future.wait([
+        _firebase.countDocuments(
+          _collectionName,
+          filters: [
+            QueryFilter(
+              field: 'createdAt',
+              operator: FilterOperator.isGreaterThanOrEqualTo,
+              value: Timestamp.fromDate(thisMonthStart),
+            ),
+          ],
+          cacheKey: 'bookings_count_this_month',
+        ),
+        _firebase.countDocuments(
+          _collectionName,
+          filters: [
+            QueryFilter(
+              field: 'createdAt',
+              operator: FilterOperator.isGreaterThanOrEqualTo,
+              value: Timestamp.fromDate(lastMonthStart),
+            ),
+            QueryFilter(
+              field: 'createdAt',
+              operator: FilterOperator.isLessThanOrEqualTo,
+              value: Timestamp.fromDate(lastMonthEnd),
+            ),
+          ],
+          cacheKey: 'bookings_count_last_month',
+        ),
+      ]);
 
+      final thisMonth = monthlyResults[0];
+      final lastMonth = monthlyResults[1];
       final growth = lastMonth > 0
           ? ((thisMonth - lastMonth) / lastMonth * 100)
           : 0.0;
 
-      return {
-        'total': bookings.length,
-        'statusCounts': statusCounts,
-        'totalRevenue': totalRevenue,
-        'monthlyGrowth': growth,
+      final stats = {
+        'total': results[0],
+        'pending': results[1],
+        'confirmed': results[2],
+        'completed': results[3],
+        'cancelled': results[4],
         'thisMonth': thisMonth,
         'lastMonth': lastMonth,
-        'averageBookingValue': bookings.isNotEmpty
-            ? totalRevenue / bookings.length
-            : 0.0,
+        'monthlyGrowth': growth,
+        'last_updated': DateTime.now().toIso8601String(),
       };
+
+      _cache.set(cacheKey, stats, timeout: const Duration(minutes: 5));
+      return stats;
     } catch (e) {
-      print('Erreur lors du calcul des statistiques: $e');
+      print('❌ Erreur lors du calcul des statistiques: $e');
       return {};
     }
   }
 
-  // Recherche avancée
-  static Future<List<BookingModel>> searchBookings({
+  /// Recherche avancée avec critères multiples
+  Future<List<BookingModel>> searchBookings({
     String? query,
     BookingStatus? status,
     PaymentStatus? paymentStatus,
@@ -277,74 +439,90 @@ class AdminBookingManager {
     double? minAmount,
     double? maxAmount,
   }) async {
-    try {
-      Query firestoreQuery = _firestore.collection(_collection);
+    // Construire les filtres Firestore
+    final filters = <QueryFilter>[];
 
-      // Application des filtres Firestore
-      if (status != null) {
-        firestoreQuery = firestoreQuery.where('status', isEqualTo: status.name);
-      }
-
-      if (paymentStatus != null) {
-        firestoreQuery = firestoreQuery.where(
-          'paymentStatus',
-          isEqualTo: paymentStatus.name,
-        );
-      }
-
-      if (startDate != null && endDate != null) {
-        firestoreQuery = firestoreQuery
-            .where('serviceDate', isGreaterThanOrEqualTo: startDate)
-            .where('serviceDate', isLessThanOrEqualTo: endDate);
-      }
-
-      firestoreQuery = firestoreQuery.orderBy('createdAt', descending: true);
-
-      final snapshot = await firestoreQuery.get();
-      List<BookingModel> results = snapshot.docs
-          .map((doc) => BookingModel.fromFirestore(doc))
-          .toList();
-
-      // Filtres locaux
-      if (query != null && query.isNotEmpty) {
-        results = results.where((booking) {
-          final searchLower = query.toLowerCase();
-          return booking.userName.toLowerCase().contains(searchLower) ||
-              booking.userEmail.toLowerCase().contains(searchLower) ||
-              booking.service.name.toLowerCase().contains(searchLower) ||
-              (booking.providerName?.toLowerCase().contains(searchLower) ??
-                  false);
-        }).toList();
-      }
-
-      if (minAmount != null) {
-        results = results
-            .where((booking) => booking.totalAmount >= minAmount)
-            .toList();
-      }
-
-      if (maxAmount != null) {
-        results = results
-            .where((booking) => booking.totalAmount <= maxAmount)
-            .toList();
-      }
-
-      return results;
-    } catch (e) {
-      print('Erreur lors de la recherche: $e');
-      return [];
+    if (status != null) {
+      filters.add(
+        QueryFilter(
+          field: 'status',
+          operator: FilterOperator.isEqualTo,
+          value: status.name,
+        ),
+      );
     }
+
+    if (paymentStatus != null) {
+      filters.add(
+        QueryFilter(
+          field: 'paymentStatus',
+          operator: FilterOperator.isEqualTo,
+          value: paymentStatus.name,
+        ),
+      );
+    }
+
+    if (startDate != null) {
+      filters.add(
+        QueryFilter(
+          field: 'serviceDate',
+          operator: FilterOperator.isGreaterThanOrEqualTo,
+          value: Timestamp.fromDate(startDate),
+        ),
+      );
+    }
+
+    if (endDate != null) {
+      filters.add(
+        QueryFilter(
+          field: 'serviceDate',
+          operator: FilterOperator.isLessThanOrEqualTo,
+          value: Timestamp.fromDate(endDate),
+        ),
+      );
+    }
+
+    final docs = await _firebase.getDocuments(
+      _collectionName,
+      filters: filters,
+      sorts: [QuerySort(field: 'createdAt', descending: true)],
+    );
+
+    var results = docs.map((doc) => BookingModel.fromFirestore(doc)).toList();
+
+    // Filtres locaux
+    if (query != null && query.isNotEmpty) {
+      final searchLower = query.toLowerCase();
+      results = results.where((booking) {
+        return booking.service.name.toLowerCase().contains(searchLower) ||
+            booking.userName.toLowerCase().contains(searchLower) ||
+            (booking.providerName?.toLowerCase().contains(searchLower) ??
+                false);
+      }).toList();
+    }
+
+    if (minAmount != null) {
+      results = results
+          .where((booking) => booking.totalAmount >= minAmount)
+          .toList();
+    }
+
+    if (maxAmount != null) {
+      results = results
+          .where((booking) => booking.totalAmount <= maxAmount)
+          .toList();
+    }
+
+    return results;
   }
 
-  // Gestion du cache
-  static void _invalidateCache() {
-    _cachedBookings = null;
-    _lastCacheUpdate = null;
+  /// Forcer le rechargement en vidant le cache
+  Future<void> forceReload() async {
+    _cache.clearByPrefix('bookings_');
   }
 
-  static bool _isCacheValid() {
-    return _cachedBookings != null &&
-        _lastCacheUpdate != null &&
-        DateTime.now().difference(_lastCacheUpdate!) < _cacheTimeout;
+  /// Nettoie les ressources (streams, etc.)
+  void dispose() {
+    _firebase.closeStream('bookings_stream');
   }
 }

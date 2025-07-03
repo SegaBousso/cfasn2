@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 import '../../../../models/service_model.dart';
 import '../../../../services/favorite_service.dart';
 import 'services_data_service.dart';
+import 'services_mock_service.dart';
 
 class ServicesService {
   final ServicesDataService _dataService = ServicesDataService();
   final FavoriteService _favoriteService = FavoriteService();
+  final ServicesMockService _mockService = ServicesMockService();
 
   /// Récupère tous les services avec gestion des favoris
   Future<ServicesData> getAllServicesWithFavorites() async {
@@ -65,41 +67,14 @@ class ServicesService {
       final categories = await _dataService.getServiceCategories();
       print('📊 ServicesService: Catégories reçues: ${categories.length}');
 
-      // Filtrer les catégories qui ont déjà l'id 'all' pour éviter les doublons
-      final filteredCategories = categories
-          .where((cat) => cat['id'] != 'all')
-          .toList();
-
       print(
-        '📂 ServicesService: Catégories filtrées: ${filteredCategories.length}',
+        '✅ ServicesService: Total catégories finales: ${categories.length}',
       );
-
-      // Ajouter la catégorie "Tous" en premier
-      final allCategories = [
-        ServiceCategory(
-          id: 'all',
-          name: 'Tous',
-          icon: Icons.apps,
-          servicesCount: 0,
-        ),
-        ...filteredCategories.map(
-          (cat) => ServiceCategory(
-            id: cat['id'],
-            name: cat['name'],
-            icon: _getIconFromString(cat['icon']),
-            servicesCount: cat['servicesCount'],
-          ),
-        ),
-      ];
-
-      print(
-        '✅ ServicesService: Total catégories finales: ${allCategories.length}',
-      );
-      for (final cat in allCategories) {
+      for (final cat in categories) {
         print('   - ${cat.name} (${cat.id})');
       }
 
-      return allCategories;
+      return categories;
     } catch (e) {
       print('Erreur lors de la récupération des catégories: $e');
       return [
@@ -131,52 +106,6 @@ class ServicesService {
       print('Erreur lors de la vérification des favoris: $e');
       return false;
     }
-  }
-
-  /// Récupère un service par son ID avec ses détails
-  Future<ServiceDetailsData?> getServiceDetails(String serviceId) async {
-    try {
-      final service = await _dataService.getServiceById(serviceId);
-      if (service == null) return null;
-
-      final isFavorite = await _favoriteService.isFavorite(serviceId);
-
-      // Incrémenter le nombre de vues
-      await _dataService.incrementServiceViews(serviceId);
-
-      return ServiceDetailsData(service: service, isFavorite: isFavorite);
-    } catch (e) {
-      print('Erreur lors de la récupération des détails du service: $e');
-      return null;
-    }
-  }
-
-  /// Récupère les services populaires
-  Future<List<ServiceModel>> getPopularServices({int limit = 10}) async {
-    try {
-      return await _dataService.getPopularServices(limit: limit);
-    } catch (e) {
-      print('Erreur lors de la récupération des services populaires: $e');
-      return [];
-    }
-  }
-
-  /// Récupère les services récents
-  Future<List<ServiceModel>> getRecentServices({int limit = 10}) async {
-    try {
-      return await _dataService.getRecentServices(limit: limit);
-    } catch (e) {
-      print('Erreur lors de la récupération des services récents: $e');
-      return [];
-    }
-  }
-
-  /// Stream pour écouter les changements de services
-  Stream<List<ServiceModel>> getServicesStream({String? categoryId}) {
-    if (categoryId != null && categoryId != 'all') {
-      return _dataService.getServicesByCategoryStream(categoryId);
-    }
-    return _dataService.getServicesStream();
   }
 
   /// Applique les filtres aux services
@@ -212,43 +141,19 @@ class ServicesService {
     }).toList();
   }
 
-  /// Convertit une string d'icône en IconData
-  IconData _getIconFromString(String iconName) {
-    switch (iconName.toLowerCase()) {
-      case 'plumbing':
-      case 'plomberie':
-        return Icons.plumbing;
-      case 'electrical_services':
-      case 'electricite':
-        return Icons.electrical_services;
-      case 'cleaning_services':
-      case 'menage':
-        return Icons.cleaning_services;
-      case 'grass':
-      case 'jardinage':
-        return Icons.grass;
-      case 'build':
-      case 'construction':
-        return Icons.build;
-      case 'car_repair':
-      case 'automobile':
-        return Icons.car_repair;
-      case 'computer':
-      case 'informatique':
-        return Icons.computer;
-      default:
-        return Icons.build;
-    }
-  }
-
   /// Helper method to create sample categories during development
   Future<void> createSampleCategories() async {
-    return await _dataService.createSampleCategories();
+    return await _mockService.createSampleCategories();
   }
 
   /// Helper method to create sample services during development
   Future<void> createSampleServices() async {
-    return await _dataService.createSampleServices();
+    return await _mockService.createSampleServices();
+  }
+
+  /// Helper method to create all sample data during development
+  Future<void> createAllSampleData() async {
+    return await _mockService.createAllSampleData();
   }
 }
 
@@ -266,19 +171,4 @@ class ServiceDetailsData {
   final bool isFavorite;
 
   ServiceDetailsData({required this.service, required this.isFavorite});
-}
-
-/// Classe pour représenter une catégorie de service
-class ServiceCategory {
-  final String id;
-  final String name;
-  final IconData icon;
-  final int servicesCount;
-
-  ServiceCategory({
-    required this.id,
-    required this.name,
-    required this.icon,
-    required this.servicesCount,
-  });
 }

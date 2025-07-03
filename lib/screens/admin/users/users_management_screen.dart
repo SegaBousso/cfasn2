@@ -407,6 +407,7 @@ class _UsersManagementScreenState extends State<UsersManagementScreen> {
         ],
       ),
       floatingActionButton: FloatingActionButton(
+        heroTag: "users_management_fab",
         onPressed: _showAddUserDialog,
         tooltip: 'Ajouter un utilisateur',
         child: const Icon(Icons.add),

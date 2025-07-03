@@ -96,6 +96,8 @@ class BookingModel {
       bookingDate: now,
       serviceDate: serviceDate,
       service: service,
+      status: BookingStatus.pending, // Valeur par défaut ajoutée
+      paymentStatus: PaymentStatus.pending, // Valeur par défaut ajoutée
       paymentMethod: paymentMethod,
       serviceDescription: serviceDescription.isEmpty
           ? service.description
@@ -105,6 +107,12 @@ class BookingModel {
       currency: service.currency,
       createdAt: now,
       updatedAt: now,
+      providerId: service.providerId?.isNotEmpty == true
+          ? service.providerId
+          : null,
+      providerName: service.providerName?.isNotEmpty == true
+          ? service.providerName
+          : null,
     );
   }
 

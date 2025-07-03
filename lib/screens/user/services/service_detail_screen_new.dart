@@ -2,9 +2,12 @@ import 'package:flutter/material.dart';
 import '../../../services/review_service.dart';
 import '../../../models/service_model.dart';
 import '../../../models/review_model.dart';
+import '../../../models/provider_model.dart';
 import 'services/services_service.dart';
 import 'sections/service_detail_sections.dart';
 import 'widgets/service_widgets.dart';
+import '../bookings/create_booking_screen.dart';
+import '../../admin/providers/admin_provider_manager.dart';
 
 class ServiceDetailScreen extends StatefulWidget {
   final ServiceModel service;
@@ -18,34 +21,27 @@ class ServiceDetailScreen extends StatefulWidget {
 class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
   final ReviewService _reviewService = ReviewService();
   final ServicesService _servicesService = ServicesService();
+  final AdminProviderManager _providerManager = AdminProviderManager();
 
   bool _isFavorite = false;
   bool _isLoadingFavorite = true;
   List<ReviewModel> _reviews = [];
   bool _isLoadingReviews = true;
+  ProviderModel? _provider;
+  bool _isLoadingProvider = true;
   final PageController _pageController = PageController();
   int _currentImageIndex = 0;
 
-  // Images du service (priorité imageUrl puis imagePath)
+  // Images du service (utilise displayImage pour simplifier)
   List<String> get _serviceImages {
-    final images = <String>[];
-
-    if (widget.service.imageUrl != null &&
-        widget.service.imageUrl!.isNotEmpty) {
-      images.add(widget.service.imageUrl!);
-    } else if (widget.service.imagePath != null &&
-        widget.service.imagePath!.isNotEmpty) {
-      images.add(widget.service.imagePath!);
+    final imageUrl = widget.service.displayImage;
+    if (imageUrl.isNotEmpty) {
+      return [imageUrl];
     }
-
     // Image par défaut si aucune image
-    if (images.isEmpty) {
-      images.add(
-        'https://via.placeholder.com/400x300?text=${Uri.encodeComponent(widget.service.name)}',
-      );
-    }
-
-    return images;
+    return [
+      'https://via.placeholder.com/400x300/6366f1/FFFFFF?text=${Uri.encodeComponent(widget.service.name)}',
+    ];
   }
 
   @override
@@ -56,20 +52,26 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
 
   /// Charge tous les détails du service
   Future<void> _loadServiceDetails() async {
-    await Future.wait([_loadFavoriteStatus(), _loadReviews()]);
+    await Future.wait([
+      _loadFavoriteStatus(),
+      _loadReviews(),
+      _loadProviderDetails(),
+    ]);
   }
 
   /// Charge le statut favori
   Future<void> _loadFavoriteStatus() async {
     try {
-      final serviceDetails = await _servicesService.getServiceDetails(
+      final isFavorite = await _servicesService.isServiceFavorite(
         widget.service.id,
       );
+      if (!mounted) return;
       setState(() {
-        _isFavorite = serviceDetails?.isFavorite ?? false;
+        _isFavorite = isFavorite;
         _isLoadingFavorite = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() => _isLoadingFavorite = false);
       _showErrorMessage('Erreur lors du chargement des favoris');
     }
@@ -86,6 +88,29 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
     } catch (e) {
       setState(() => _isLoadingReviews = false);
       _showErrorMessage('Erreur lors du chargement des avis');
+    }
+  }
+
+  /// Charge les détails du prestataire
+  Future<void> _loadProviderDetails() async {
+    if (widget.service.providerId == null) {
+      setState(() => _isLoadingProvider = false);
+      return;
+    }
+
+    try {
+      final provider = await _providerManager.getProviderById(
+        widget.service.providerId!,
+      );
+      if (!mounted) return;
+      setState(() {
+        _provider = provider;
+        _isLoadingProvider = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isLoadingProvider = false);
+      _showErrorMessage('Erreur lors du chargement du prestataire');
     }
   }
 
@@ -116,8 +141,19 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
 
   /// Contacte le prestataire
   void _contactProvider() {
+    if (_provider == null) {
+      _showErrorMessage('Informations du prestataire non disponibles');
+      return;
+    }
+
+    // TODO: Implémenter la logique de contact (email, téléphone, chat)
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Fonctionnalité de contact à venir')),
+      SnackBar(
+        content: Text(
+          'Contact avec ${_provider!.name} - Fonctionnalité à venir',
+        ),
+        duration: const Duration(seconds: 3),
+      ),
     );
   }
 
@@ -128,11 +164,12 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
       return;
     }
 
-    // Navigation vers la page de réservation
-    Navigator.pushNamed(
+    // Navigation vers la page de réservation avec MaterialPageRoute
+    Navigator.push(
       context,
-      '/user/bookings/create',
-      arguments: widget.service,
+      MaterialPageRoute(
+        builder: (context) => CreateBookingScreen(service: widget.service),
+      ),
     );
   }
 
@@ -176,6 +213,8 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
                 const SizedBox(height: 16),
                 ServiceProviderSection(
                   service: widget.service,
+                  provider: _provider,
+                  isLoadingProvider: _isLoadingProvider,
                   onContactTap: _contactProvider,
                 ),
                 const SizedBox(height: 16),
@@ -288,9 +327,9 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
       child: SafeArea(
         child: Row(
           children: [
-            if (widget.service.providerName != null) ...[
+            if (widget.service.providerId != null && !_isLoadingProvider) ...[
               OutlinedButton(
-                onPressed: _contactProvider,
+                onPressed: _provider != null ? _contactProvider : null,
                 style: OutlinedButton.styleFrom(
                   padding: const EdgeInsets.symmetric(
                     vertical: 16,

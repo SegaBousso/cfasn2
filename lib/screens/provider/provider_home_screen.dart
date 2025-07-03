@@ -136,6 +136,7 @@ class _ProviderHomeScreenState extends State<ProviderHomeScreen> {
         ),
       ),
       floatingActionButton: FloatingActionButton(
+        heroTag: "provider_home_fab",
         onPressed: () {
           Navigator.pushNamed(context, '/provider/services/create');
         },

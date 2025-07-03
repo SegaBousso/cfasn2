@@ -220,6 +220,7 @@ class _CategoriesManagementScreenState
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
+        heroTag: "categories_management_fab",
         onPressed: () => _navigateToCreateCategory(),
         icon: const Icon(Icons.add),
         label: const Text('Nouvelle catégorie'),

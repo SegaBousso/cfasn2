@@ -13,6 +13,8 @@ class BookingDetailsScreen extends StatefulWidget {
 }
 
 class _BookingDetailsScreenState extends State<BookingDetailsScreen> {
+  final _bookingManager = AdminBookingManager();
+
   BookingModel? _booking;
   bool _isLoading = true;
   bool _isUpdating = false;
@@ -27,9 +29,7 @@ class _BookingDetailsScreenState extends State<BookingDetailsScreen> {
     setState(() => _isLoading = true);
 
     try {
-      final booking = await AdminBookingManager.getBookingById(
-        widget.bookingId,
-      );
+      final booking = await _bookingManager.getBookingById(widget.bookingId);
       setState(() => _booking = booking);
     } catch (e) {
       if (mounted) {
@@ -55,7 +55,7 @@ class _BookingDetailsScreenState extends State<BookingDetailsScreen> {
         }
       }
 
-      final success = await AdminBookingManager.updateBookingStatus(
+      final success = await _bookingManager.updateBookingStatus(
         widget.bookingId,
         newStatus,
         reason: reason,
@@ -84,7 +84,7 @@ class _BookingDetailsScreenState extends State<BookingDetailsScreen> {
     setState(() => _isUpdating = true);
 
     try {
-      final success = await AdminBookingManager.updatePaymentStatus(
+      final success = await _bookingManager.updatePaymentStatus(
         widget.bookingId,
         newStatus,
       );
@@ -599,7 +599,7 @@ class _BookingDetailsScreenState extends State<BookingDetailsScreen> {
           TextButton(
             onPressed: () async {
               Navigator.pop(context);
-              final success = await AdminBookingManager.deleteBooking(
+              final success = await _bookingManager.deleteBooking(
                 widget.bookingId,
               );
               if (success && mounted) {

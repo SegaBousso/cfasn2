@@ -26,6 +26,12 @@ class _ServicesManagementScreenState extends State<ServicesManagementScreen>
 
   List<String> _categories = ['Tous'];
 
+  // Cache des données pour éviter les appels répétés
+  List<ServiceModel> _allServices = [];
+  List<ServiceModel> _activeServices = [];
+  List<ServiceModel> _inactiveServices = [];
+  Map<String, dynamic> _stats = {};
+
   @override
   void initState() {
     super.initState();
@@ -45,7 +51,7 @@ class _ServicesManagementScreenState extends State<ServicesManagementScreen>
     });
 
     try {
-      await Future.wait([_serviceManager.refreshData(), _loadCategories()]);
+      await Future.wait([_loadServices(), _loadCategories(), _loadStats()]);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -64,33 +70,50 @@ class _ServicesManagementScreenState extends State<ServicesManagementScreen>
     }
   }
 
+  Future<void> _loadServices() async {
+    try {
+      final results = await Future.wait([
+        _serviceManager.allServices,
+        _serviceManager.activeServices,
+        _serviceManager.inactiveServices,
+      ]);
+
+      setState(() {
+        _allServices = results[0];
+        _activeServices = results[1];
+        _inactiveServices = results[2];
+      });
+    } catch (e) {
+      print('Erreur lors du chargement des services: $e');
+    }
+  }
+
+  Future<void> _loadStats() async {
+    try {
+      final stats = await _serviceManager.getServiceStats();
+      setState(() {
+        _stats = stats;
+      });
+    } catch (e) {
+      print('Erreur lors du chargement des statistiques: $e');
+    }
+  }
+
   Future<void> _loadCategories() async {
     try {
       final categories = await _categoryManager.getActiveCategories();
       setState(() {
-        _categories = ['Tous', ...categories.map((c) => c.name).toList()];
+        _categories = ['Tous', ...categories.map((c) => c.name)];
       });
     } catch (e) {
+      print('Erreur lors du chargement des catégories: $e');
+      // En cas d'erreur, ne pas utiliser de données statiques
+      // Laisser seulement "Tous" pour permettre l'affichage
       setState(() {
-        _categories = [
-          'Tous',
-          'Nettoyage',
-          'Réparation',
-          'Éducation',
-          'Santé',
-          'Beauté',
-          'Jardinage',
-          'Transport',
-          'Informatique',
-        ];
+        _categories = ['Tous'];
       });
     }
   }
-
-  List<ServiceModel> get _allServices => _serviceManager.allServicesSync;
-  List<ServiceModel> get _activeServices => _serviceManager.activeServicesSync;
-  List<ServiceModel> get _inactiveServices =>
-      _serviceManager.inactiveServicesSync;
 
   @override
   Widget build(BuildContext context) {
@@ -194,6 +217,7 @@ class _ServicesManagementScreenState extends State<ServicesManagementScreen>
         ],
       ),
       floatingActionButton: FloatingActionButton(
+        heroTag: "services_management_fab",
         onPressed: _navigateToCreateService,
         backgroundColor: Colors.deepPurple,
         foregroundColor: Colors.white,
@@ -222,7 +246,7 @@ class _ServicesManagementScreenState extends State<ServicesManagementScreen>
           Expanded(
             child: _buildStatItem(
               'Total',
-              '${_serviceManager.totalServicesCountSync}',
+              '${_stats['totalServices'] ?? _allServices.length}',
               Icons.build,
               Colors.blue,
             ),
@@ -231,7 +255,7 @@ class _ServicesManagementScreenState extends State<ServicesManagementScreen>
           Expanded(
             child: _buildStatItem(
               'Actifs',
-              '${_serviceManager.activeServicesCountSync}',
+              '${_stats['activeServices'] ?? _activeServices.length}',
               Icons.check_circle,
               Colors.green,
             ),
@@ -240,7 +264,7 @@ class _ServicesManagementScreenState extends State<ServicesManagementScreen>
           Expanded(
             child: _buildStatItem(
               'Note',
-              '${_serviceManager.averageRatingSync.toStringAsFixed(1)}',
+              '${(_stats['averageRating'] ?? 0.0).toStringAsFixed(1)}',
               Icons.star,
               Colors.orange,
             ),
@@ -443,8 +467,8 @@ class _ServicesManagementScreenState extends State<ServicesManagementScreen>
   }
 
   Future<void> _refreshServices() async {
-    await _serviceManager.refreshData();
-    setState(() {});
+    await _serviceManager.forceReload();
+    await Future.wait([_loadServices(), _loadStats()]);
   }
 
   Future<void> _navigateToCreateService() async {

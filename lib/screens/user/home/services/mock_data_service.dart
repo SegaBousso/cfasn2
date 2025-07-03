@@ -6,8 +6,8 @@ class MockDataService {
   static final AdminServiceManager _adminServiceManager = AdminServiceManager();
 
   // Méthode pour obtenir tous les services (admin + mock)
-  static List<ServiceModel> getAllServices() {
-    final adminServices = _getAdminServices();
+  static Future<List<ServiceModel>> getAllServices() async {
+    final adminServices = await _getAdminServices();
     final mockServices = _getMockServices();
 
     // Combiner les services admin et mock, en évitant les doublons
@@ -34,8 +34,9 @@ class MockDataService {
   }
 
   // Services créés par l'administrateur
-  static List<ServiceModel> _getAdminServices() {
-    return _adminServiceManager.allServicesSync
+  static Future<List<ServiceModel>> _getAdminServices() async {
+    final allServices = await _adminServiceManager.allServices;
+    return allServices
         .where((service) => service.isActive && service.isAvailable)
         .map((service) => _enhanceServiceForUser(service))
         .toList();
@@ -108,8 +109,8 @@ class MockDataService {
   }
 
   // Méthode pour la compatibilité (retourne tous les services)
-  static List<ServiceModel> getMockServices() {
-    return getAllServices();
+  static Future<List<ServiceModel>> getMockServices() async {
+    return await getAllServices();
   }
 
   // Services mock originaux (pour les tests et la compatibilité)

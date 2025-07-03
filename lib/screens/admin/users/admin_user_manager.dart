@@ -1,104 +1,417 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../../models/user_model.dart';
+import '../services/admin_firebase_manager.dart';
+import '../utils/admin_cache_manager.dart';
 
+/// Gestionnaire des utilisateurs pour l'administration
+/// Utilise l'architecture unifiée avec cache et Firebase manager
 class AdminUserManager {
   static final AdminUserManager _instance = AdminUserManager._internal();
   factory AdminUserManager() => _instance;
   AdminUserManager._internal();
 
-  // Instance Firestore
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final AdminFirebaseManager _firebase = AdminFirebaseManager();
+  final AdminCacheManager _cache = AdminCacheManager();
   final String _collectionName = 'users';
 
-  // Cache local pour les performances
-  List<UserModel> _cachedUsers = [];
-  DateTime? _lastCacheUpdate;
-  final Duration _cacheTimeout = const Duration(minutes: 5);
-
-  // Getters avec récupération automatique des données
+  /// Récupère tous les utilisateurs
   Future<List<UserModel>> get allUsers async {
-    await _ensureDataLoaded();
-    return List.unmodifiable(_cachedUsers);
+    const cacheKey = AdminCacheKeys.usersAll;
+    final cached = _cache.get<List<UserModel>>(cacheKey);
+    if (cached != null) return cached;
+
+    final docs = await _firebase.getDocuments(
+      _collectionName,
+      sorts: [QuerySort(field: 'createdAt', descending: true)],
+      cacheKey: cacheKey,
+    );
+
+    final users = docs.map((doc) {
+      final data = doc.data() as Map<String, dynamic>;
+      data['uid'] = doc.id;
+      return UserModel.fromMap(data);
+    }).toList();
+
+    return users;
   }
 
+  /// Récupère les utilisateurs actifs (vérifiés)
   Future<List<UserModel>> get activeUsers async {
-    await _ensureDataLoaded();
-    return _cachedUsers.where((u) => u.isVerified).toList();
+    const cacheKey = AdminCacheKeys.usersActive;
+    final cached = _cache.get<List<UserModel>>(cacheKey);
+    if (cached != null) return cached;
+
+    final docs = await _firebase.getDocuments(
+      _collectionName,
+      filters: [
+        QueryFilter(
+          field: 'isVerified',
+          operator: FilterOperator.isEqualTo,
+          value: true,
+        ),
+      ],
+      sorts: [QuerySort(field: 'createdAt', descending: true)],
+      cacheKey: cacheKey,
+    );
+
+    final users = docs.map((doc) {
+      final data = doc.data() as Map<String, dynamic>;
+      data['uid'] = doc.id;
+      return UserModel.fromMap(data);
+    }).toList();
+
+    return users;
   }
 
+  /// Récupère les utilisateurs vérifiés
   Future<List<UserModel>> get verifiedUsers async {
-    await _ensureDataLoaded();
-    return _cachedUsers.where((u) => u.isVerified).toList();
+    return activeUsers; // Même logique que activeUsers
   }
 
-  // Alias pour compatibilité
+  /// Alias pour compatibilité
   Future<List<UserModel>> getAllUsers() async {
     return allUsers;
   }
 
-  // Méthode pour supprimer plusieurs utilisateurs
+  /// Supprime plusieurs utilisateurs avec opération batch
   Future<void> deleteMultipleUsers(List<String> userIds) async {
     try {
-      final batch = _firestore.batch();
+      final operations = userIds.map((userId) {
+        final docRef = FirebaseFirestore.instance
+            .collection(_collectionName)
+            .doc(userId);
+        return BatchOperation.delete(docRef);
+      }).toList();
 
-      for (final userId in userIds) {
-        final docRef = _firestore.collection(_collectionName).doc(userId);
-        batch.delete(docRef);
-      }
+      await _firebase.executeBatch(operations);
 
-      await batch.commit();
+      // Invalider le cache
+      _cache.clearByPrefix('users_');
 
-      // Mise à jour du cache
-      _cachedUsers.removeWhere((user) => userIds.contains(user.uid));
-      _triggerCacheUpdate();
+      print('✅ ${userIds.length} utilisateurs supprimés avec succès');
     } catch (e) {
-      print('Erreur lors de la suppression d\'utilisateurs: $e');
+      print('❌ Erreur lors de la suppression d\'utilisateurs: $e');
       rethrow;
     }
   }
 
+  /// Récupère les utilisateurs par rôle
   Future<List<UserModel>> getUsersByRole(UserRole role) async {
-    await _ensureDataLoaded();
-    return _cachedUsers.where((u) => u.role == role).toList();
+    final cacheKey = 'users_role_${role.toString()}';
+    final cached = _cache.get<List<UserModel>>(cacheKey);
+    if (cached != null) return cached;
+
+    final docs = await _firebase.getDocuments(
+      _collectionName,
+      filters: [
+        QueryFilter(
+          field: 'role',
+          operator: FilterOperator.isEqualTo,
+          value: role.toString(),
+        ),
+      ],
+      sorts: [QuerySort(field: 'createdAt', descending: true)],
+      cacheKey: cacheKey,
+    );
+
+    final users = docs.map((doc) {
+      final data = doc.data() as Map<String, dynamic>;
+      data['uid'] = doc.id;
+      return UserModel.fromMap(data);
+    }).toList();
+
+    return users;
   }
 
-  // Getters synchrones pour le cache
-  List<UserModel> get allUsersSync => List.unmodifiable(_cachedUsers);
+  /// Obtenir un utilisateur par UID
+  Future<UserModel?> getUserById(String uid) async {
+    final cacheKey = AdminCacheKeys.userById(uid);
+    final cached = _cache.get<UserModel>(cacheKey);
+    if (cached != null) return cached;
 
-  /// S'assurer que les données sont chargées et à jour
-  Future<void> _ensureDataLoaded() async {
-    if (_cachedUsers.isEmpty || _isCacheExpired()) {
-      await _loadUsersFromFirestore();
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection(_collectionName)
+          .doc(uid)
+          .get();
+
+      if (!doc.exists) return null;
+
+      final data = doc.data() as Map<String, dynamic>;
+      data['uid'] = doc.id;
+      final user = UserModel.fromMap(data);
+
+      _cache.set(cacheKey, user);
+      return user;
+    } catch (e) {
+      print('❌ Erreur lors de la récupération de l\'utilisateur: $e');
+      return null;
     }
   }
 
-  bool _isCacheExpired() {
-    if (_lastCacheUpdate == null) return true;
-    return DateTime.now().difference(_lastCacheUpdate!) > _cacheTimeout;
+  /// Ajouter un nouvel utilisateur
+  Future<void> addUser(UserModel user) async {
+    try {
+      final docRef = FirebaseFirestore.instance
+          .collection(_collectionName)
+          .doc(user.uid);
+
+      final operation = BatchOperation.create(docRef, user.toMap());
+      await _firebase.executeBatch([operation]);
+
+      // Invalider le cache
+      _cache.clearByPrefix('users_');
+      _cache.set(AdminCacheKeys.userById(user.uid), user);
+
+      print('✅ Utilisateur ajouté avec succès');
+    } catch (e) {
+      print('❌ Erreur lors de l\'ajout de l\'utilisateur: $e');
+      rethrow;
+    }
   }
 
-  /// Charger les utilisateurs depuis Firestore
-  Future<void> _loadUsersFromFirestore() async {
+  /// Mettre à jour un utilisateur
+  Future<void> updateUser(UserModel user) async {
     try {
-      final QuerySnapshot snapshot = await _firestore
+      final docRef = FirebaseFirestore.instance
           .collection(_collectionName)
-          .orderBy('createdAt', descending: true)
-          .get();
+          .doc(user.uid);
 
-      _cachedUsers = snapshot.docs.map((doc) {
-        final data = doc.data() as Map<String, dynamic>;
-        data['uid'] = doc.id; // Assurer que l'UID est défini
-        return UserModel.fromMap(data);
-      }).toList();
+      final operation = BatchOperation.update(docRef, user.toMap());
+      await _firebase.executeBatch([operation]);
 
-      _lastCacheUpdate = DateTime.now();
+      // Mettre à jour le cache
+      _cache.clearByPrefix('users_');
+      _cache.set(AdminCacheKeys.userById(user.uid), user);
 
-      // Si aucun utilisateur n'existe, créer des utilisateurs par défaut
-      if (_cachedUsers.isEmpty) {
-        await _createDefaultUsers();
-      }
+      print('✅ Utilisateur mis à jour avec succès');
     } catch (e) {
-      print('Erreur lors du chargement des utilisateurs: $e');
+      print('❌ Erreur lors de la mise à jour de l\'utilisateur: $e');
+      rethrow;
+    }
+  }
+
+  /// Supprimer un utilisateur
+  Future<void> deleteUser(String uid) async {
+    try {
+      final docRef = FirebaseFirestore.instance
+          .collection(_collectionName)
+          .doc(uid);
+
+      final operation = BatchOperation.delete(docRef);
+      await _firebase.executeBatch([operation]);
+
+      // Invalider le cache
+      _cache.clearByPrefix('users_');
+
+      print('✅ Utilisateur supprimé avec succès');
+    } catch (e) {
+      print('❌ Erreur lors de la suppression de l\'utilisateur: $e');
+      rethrow;
+    }
+  }
+
+  /// Rechercher des utilisateurs
+  Future<List<UserModel>> searchUsers(String query) async {
+    if (query.isEmpty) return await allUsers;
+
+    // Pour une recherche simple, on récupère tous les utilisateurs et on filtre
+    final users = await allUsers;
+    final lowercaseQuery = query.toLowerCase();
+
+    return users.where((user) {
+      return user.email.toLowerCase().contains(lowercaseQuery) ||
+          user.displayName.toLowerCase().contains(lowercaseQuery) ||
+          user.firstName.toLowerCase().contains(lowercaseQuery) ||
+          user.lastName.toLowerCase().contains(lowercaseQuery) ||
+          (user.phoneNumber?.contains(query) ?? false);
+    }).toList();
+  }
+
+  /// Filtrer les utilisateurs avec critères avancés
+  Future<List<UserModel>> filterUsers({
+    UserRole? role,
+    bool? isVerified,
+    bool? isAdmin,
+    DateTime? createdAfter,
+    DateTime? createdBefore,
+  }) async {
+    // Construire la clé de cache basée sur les filtres
+    final cacheKey =
+        'users_filtered_${role}_${isVerified}_${isAdmin}_${createdAfter}_${createdBefore}';
+    final cached = _cache.get<List<UserModel>>(cacheKey);
+    if (cached != null) return cached;
+
+    // Construire les filtres Firestore
+    final filters = <QueryFilter>[];
+
+    if (role != null) {
+      filters.add(
+        QueryFilter(
+          field: 'role',
+          operator: FilterOperator.isEqualTo,
+          value: role.toString(),
+        ),
+      );
+    }
+
+    if (isVerified != null) {
+      filters.add(
+        QueryFilter(
+          field: 'isVerified',
+          operator: FilterOperator.isEqualTo,
+          value: isVerified,
+        ),
+      );
+    }
+
+    if (isAdmin != null) {
+      filters.add(
+        QueryFilter(
+          field: 'isAdmin',
+          operator: FilterOperator.isEqualTo,
+          value: isAdmin,
+        ),
+      );
+    }
+
+    if (createdAfter != null) {
+      filters.add(
+        QueryFilter(
+          field: 'createdAt',
+          operator: FilterOperator.isGreaterThanOrEqualTo,
+          value: Timestamp.fromDate(createdAfter),
+        ),
+      );
+    }
+
+    if (createdBefore != null) {
+      filters.add(
+        QueryFilter(
+          field: 'createdAt',
+          operator: FilterOperator.isLessThanOrEqualTo,
+          value: Timestamp.fromDate(createdBefore),
+        ),
+      );
+    }
+
+    final docs = await _firebase.getDocuments(
+      _collectionName,
+      filters: filters,
+      sorts: [QuerySort(field: 'createdAt', descending: true)],
+      cacheKey: cacheKey,
+    );
+
+    final users = docs.map((doc) {
+      final data = doc.data() as Map<String, dynamic>;
+      data['uid'] = doc.id;
+      return UserModel.fromMap(data);
+    }).toList();
+
+    return users;
+  }
+
+  /// Obtient les statistiques des utilisateurs
+  Future<Map<String, dynamic>> getStats() async {
+    const cacheKey = 'users_stats';
+    final cached = _cache.get<Map<String, dynamic>>(cacheKey);
+    if (cached != null) return cached;
+
+    // Utiliser le service de statistiques pour des calculs optimisés
+    final results = await Future.wait([
+      _firebase.countDocuments(_collectionName, cacheKey: 'users_count_total'),
+      _firebase.countDocuments(
+        _collectionName,
+        filters: [
+          QueryFilter(
+            field: 'isVerified',
+            operator: FilterOperator.isEqualTo,
+            value: true,
+          ),
+        ],
+        cacheKey: 'users_count_verified',
+      ),
+      _firebase.countDocuments(
+        _collectionName,
+        filters: [
+          QueryFilter(
+            field: 'isAdmin',
+            operator: FilterOperator.isEqualTo,
+            value: true,
+          ),
+        ],
+        cacheKey: 'users_count_admins',
+      ),
+      _firebase.countDocuments(
+        _collectionName,
+        filters: [
+          QueryFilter(
+            field: 'role',
+            operator: FilterOperator.isEqualTo,
+            value: UserRole.provider.toString(),
+          ),
+        ],
+        cacheKey: 'users_count_providers',
+      ),
+      _firebase.countDocuments(
+        _collectionName,
+        filters: [
+          QueryFilter(
+            field: 'role',
+            operator: FilterOperator.isEqualTo,
+            value: UserRole.client.toString(),
+          ),
+        ],
+        cacheKey: 'users_count_clients',
+      ),
+    ]);
+
+    final stats = {
+      'total': results[0],
+      'verified': results[1],
+      'admins': results[2],
+      'providers': results[3],
+      'clients': results[4],
+      'unverified': results[0] - results[1],
+      'last_updated': DateTime.now().toIso8601String(),
+    };
+
+    _cache.set(cacheKey, stats, timeout: const Duration(minutes: 5));
+    return stats;
+  }
+
+  /// Forcer le rechargement en vidant le cache
+  Future<void> forceReload() async {
+    _cache.clearByPrefix('users_');
+  }
+
+  /// Créer un stream temps réel pour les utilisateurs
+  Stream<List<UserModel>> getUsersStream({
+    List<QueryFilter>? filters,
+    int? limit,
+  }) {
+    return _firebase
+        .createDocumentsStream(
+          _collectionName,
+          filters: filters,
+          sorts: [QuerySort(field: 'createdAt', descending: true)],
+          limit: limit,
+          streamKey: 'users_stream',
+        )
+        .map((docs) {
+          return docs.map((doc) {
+            final data = doc.data() as Map<String, dynamic>;
+            data['uid'] = doc.id;
+            return UserModel.fromMap(data);
+          }).toList();
+        });
+  }
+
+  /// Initialiser des données par défaut si nécessaire
+  Future<void> initializeDefaultData() async {
+    final count = await _firebase.countDocuments(_collectionName);
+    if (count == 0) {
+      await _createDefaultUsers();
     }
   }
 
@@ -163,141 +476,19 @@ class AdminUserManager {
       ),
     ];
 
-    // Sauvegarder les utilisateurs par défaut
-    for (final user in defaultUsers) {
-      await _firestore
+    // Créer les opérations batch
+    final operations = defaultUsers.map((user) {
+      final docRef = FirebaseFirestore.instance
           .collection(_collectionName)
-          .doc(user.uid)
-          .set(user.toMap());
-    }
-
-    _cachedUsers = defaultUsers;
-    _triggerCacheUpdate();
-  }
-
-  /// Déclencher la mise à jour du cache
-  void _triggerCacheUpdate() {
-    _lastCacheUpdate = DateTime.now();
-  }
-
-  /// Forcer le rechargement du cache
-  Future<void> forceReload() async {
-    _lastCacheUpdate = null;
-    await _loadUsersFromFirestore();
-  }
-
-  /// Obtenir un utilisateur par UID
-  Future<UserModel?> getUserById(String uid) async {
-    await _ensureDataLoaded();
-    try {
-      return _cachedUsers.firstWhere((u) => u.uid == uid);
-    } catch (e) {
-      return null;
-    }
-  }
-
-  /// Ajouter un nouvel utilisateur
-  Future<void> addUser(UserModel user) async {
-    try {
-      await _firestore
-          .collection(_collectionName)
-          .doc(user.uid)
-          .set(user.toMap());
-      _cachedUsers.add(user);
-      _triggerCacheUpdate();
-    } catch (e) {
-      throw Exception('Erreur lors de l\'ajout de l\'utilisateur: $e');
-    }
-  }
-
-  /// Mettre à jour un utilisateur
-  Future<void> updateUser(UserModel user) async {
-    try {
-      await _firestore
-          .collection(_collectionName)
-          .doc(user.uid)
-          .update(user.toMap());
-
-      final index = _cachedUsers.indexWhere((u) => u.uid == user.uid);
-      if (index != -1) {
-        _cachedUsers[index] = user;
-        _triggerCacheUpdate();
-      }
-    } catch (e) {
-      throw Exception('Erreur lors de la mise à jour de l\'utilisateur: $e');
-    }
-  }
-
-  /// Supprimer un utilisateur
-  Future<void> deleteUser(String uid) async {
-    try {
-      await _firestore.collection(_collectionName).doc(uid).delete();
-      _cachedUsers.removeWhere((u) => u.uid == uid);
-      _triggerCacheUpdate();
-    } catch (e) {
-      throw Exception('Erreur lors de la suppression de l\'utilisateur: $e');
-    }
-  }
-
-  /// Rechercher des utilisateurs
-  Future<List<UserModel>> searchUsers(String query) async {
-    await _ensureDataLoaded();
-
-    if (query.isEmpty) return _cachedUsers;
-
-    final lowercaseQuery = query.toLowerCase();
-    return _cachedUsers.where((user) {
-      return user.email.toLowerCase().contains(lowercaseQuery) ||
-          user.displayName.toLowerCase().contains(lowercaseQuery) ||
-          user.firstName.toLowerCase().contains(lowercaseQuery) ||
-          user.lastName.toLowerCase().contains(lowercaseQuery) ||
-          (user.phoneNumber?.contains(query) ?? false);
+          .doc(user.uid);
+      return BatchOperation.create(docRef, user.toMap());
     }).toList();
-  }
 
-  /// Filtrer les utilisateurs
-  Future<List<UserModel>> filterUsers({
-    UserRole? role,
-    bool? isVerified,
-    bool? isAdmin,
-    DateTime? createdAfter,
-    DateTime? createdBefore,
-  }) async {
-    await _ensureDataLoaded();
+    await _firebase.executeBatch(operations);
 
-    var filtered = _cachedUsers.where((user) {
-      if (role != null && user.role != role) return false;
-      if (isVerified != null && user.isVerified != isVerified) return false;
-      if (isAdmin != null && user.isAdmin != isAdmin) return false;
-      if (createdAfter != null && user.createdAt.isBefore(createdAfter))
-        return false;
-      if (createdBefore != null && user.createdAt.isAfter(createdBefore))
-        return false;
-      return true;
-    });
+    // Invalider le cache pour forcer le rechargement
+    _cache.clearByPrefix('users_');
 
-    return filtered.toList();
-  }
-
-  /// Obtenir les statistiques des utilisateurs
-  Future<Map<String, dynamic>> getStats() async {
-    await _ensureDataLoaded();
-
-    final total = _cachedUsers.length;
-    final verified = _cachedUsers.where((u) => u.isVerified).length;
-    final admins = _cachedUsers.where((u) => u.isAdmin).length;
-    final providers = _cachedUsers
-        .where((u) => u.role == UserRole.provider)
-        .length;
-    final clients = _cachedUsers.where((u) => u.role == UserRole.client).length;
-
-    return {
-      'total': total,
-      'verified': verified,
-      'admins': admins,
-      'providers': providers,
-      'clients': clients,
-      'unverified': total - verified,
-    };
+    print('✅ Utilisateurs par défaut créés avec succès');
   }
 }

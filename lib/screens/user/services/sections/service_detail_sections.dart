@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../../../models/service_model.dart';
 import '../../../../models/review_model.dart';
+import '../../../../models/provider_model.dart';
 import '../widgets/service_widgets.dart';
 
 /// Section pour les informations principales d'un service
@@ -61,18 +62,22 @@ class ServiceInfoSection extends StatelessWidget {
 /// Section pour les informations du prestataire
 class ServiceProviderSection extends StatelessWidget {
   final ServiceModel service;
+  final ProviderModel? provider;
+  final bool isLoadingProvider;
   final VoidCallback? onContactTap;
 
   const ServiceProviderSection({
     super.key,
     required this.service,
+    this.provider,
+    this.isLoadingProvider = false,
     this.onContactTap,
   });
 
   @override
   Widget build(BuildContext context) {
     // Si pas de prestataire défini, ne pas afficher
-    if (service.providerId == null || service.providerName == null) {
+    if (service.providerId == null) {
       return const SizedBox.shrink();
     }
 
@@ -85,47 +90,140 @@ class ServiceProviderSection extends StatelessWidget {
       ),
       child: Row(
         children: [
-          CircleAvatar(
-            radius: 25,
-            backgroundColor: Colors.grey[300],
-            child: Text(
-              service.providerName!.isNotEmpty
-                  ? service.providerName![0].toUpperCase()
-                  : 'P',
+          _buildProviderAvatar(),
+          const SizedBox(width: 12),
+          Expanded(child: _buildProviderInfo()),
+          if (onContactTap != null && !isLoadingProvider)
+            IconButton(
+              icon: const Icon(Icons.message),
+              onPressed: onContactTap,
+              style: IconButton.styleFrom(
+                backgroundColor: Colors.deepPurple.withValues(alpha: 0.1),
+                foregroundColor: Colors.deepPurple,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildProviderAvatar() {
+    if (isLoadingProvider) {
+      return CircleAvatar(
+        radius: 25,
+        backgroundColor: Colors.grey[300],
+        child: const SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+
+    final name = provider?.name ?? service.providerName ?? 'Prestataire';
+    final avatarUrl = provider?.profileImageUrl;
+
+    return CircleAvatar(
+      radius: 25,
+      backgroundColor: Colors.deepPurple,
+      backgroundImage: avatarUrl != null && avatarUrl.isNotEmpty
+          ? NetworkImage(avatarUrl)
+          : null,
+      child: avatarUrl == null || avatarUrl.isEmpty
+          ? Text(
+              name.isNotEmpty ? name[0].toUpperCase() : 'P',
               style: const TextStyle(
                 fontSize: 20,
                 fontWeight: FontWeight.bold,
                 color: Colors.white,
               ),
+            )
+          : null,
+    );
+  }
+
+  Widget _buildProviderInfo() {
+    if (isLoadingProvider) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 120,
+            height: 16,
+            decoration: BoxDecoration(
+              color: Colors.grey[300],
+              borderRadius: BorderRadius.circular(4),
             ),
           ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  service.providerName!,
-                  style: const TextStyle(
+          const SizedBox(height: 4),
+          Container(
+            width: 80,
+            height: 12,
+            decoration: BoxDecoration(
+              color: Colors.grey[300],
+              borderRadius: BorderRadius.circular(4),
+            ),
+          ),
+        ],
+      );
+    }
+
+    final name =
+        provider?.name ?? service.providerName ?? 'Prestataire inconnu';
+    final isVerified = provider?.isVerified ?? false;
+    final rating = provider?.rating ?? 0.0;
+    final ratingsCount = provider?.ratingsCount ?? 0;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                name,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                ),
+              ),
+            ),
+            if (isVerified)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.green,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Text(
+                  'Vérifié',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
                     fontWeight: FontWeight.bold,
-                    fontSize: 16,
                   ),
                 ),
-                const SizedBox(height: 4),
-                Text(
-                  'Prestataire certifié',
-                  style: TextStyle(color: Colors.grey[600], fontSize: 12),
-                ),
-              ],
-            ),
+              ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        if (rating > 0 && ratingsCount > 0)
+          Row(
+            children: [
+              Icon(Icons.star, size: 16, color: Colors.amber[600]),
+              const SizedBox(width: 4),
+              Text(
+                '$rating ($ratingsCount avis)',
+                style: TextStyle(color: Colors.grey[600], fontSize: 12),
+              ),
+            ],
+          )
+        else
+          Text(
+            'Prestataire de services',
+            style: TextStyle(color: Colors.grey[600], fontSize: 12),
           ),
-          if (onContactTap != null)
-            IconButton(
-              icon: const Icon(Icons.message),
-              onPressed: onContactTap,
-            ),
-        ],
-      ),
+      ],
     );
   }
 }

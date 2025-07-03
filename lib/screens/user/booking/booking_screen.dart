@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../../models/models.dart';
@@ -63,6 +64,9 @@ class _BookingScreenState extends State<BookingScreen> {
                 _buildPriceSummary(),
                 const SizedBox(height: 32),
                 _buildBookingButton(),
+                const SizedBox(height: 16),
+                // Bouton de debug temporaire
+                if (kDebugMode) _buildDebugButton(),
               ],
             ),
           ),
@@ -354,6 +358,56 @@ class _BookingScreenState extends State<BookingScreen> {
     );
   }
 
+  Widget _buildDebugButton() {
+    return ElevatedButton(
+      onPressed: () async {
+        try {
+          final authProvider = Provider.of<AuthProvider>(
+            context,
+            listen: false,
+          );
+          final user = authProvider.user;
+
+          if (user == null) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Utilisateur non connecté')),
+            );
+            return;
+          }
+
+          print('🔍 Vérification des réservations existantes...');
+          final bookings = await _bookingService.getUserBookings(user.uid);
+
+          print('📊 Nombre de réservations trouvées: ${bookings.length}');
+          for (final booking in bookings) {
+            print('   Réservation ID: ${booking.id}');
+            print('   Service: ${booking.service.name}');
+            print('   Date: ${booking.serviceDate}');
+            print('   Statut: ${booking.status}');
+            print('   ---');
+          }
+
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${bookings.length} réservations trouvées'),
+              backgroundColor: Colors.blue,
+            ),
+          );
+        } catch (e) {
+          print('Erreur lors de la vérification: $e');
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('Erreur: $e')));
+        }
+      },
+      style: ElevatedButton.styleFrom(
+        backgroundColor: Colors.orange,
+        foregroundColor: Colors.white,
+      ),
+      child: const Text('Debug: Vérifier réservations'),
+    );
+  }
+
   Future<void> _selectDate() async {
     final DateTime? picked = await showDatePicker(
       context: context,
@@ -435,33 +489,71 @@ class _BookingScreenState extends State<BookingScreen> {
       );
 
       print('💾 Tentative de création de réservation...');
-      final success = await _bookingService.createBooking(booking);
+      print('📋 Données de la réservation:');
+      print('   ID: ${booking.id}');
+      print('   Utilisateur: ${booking.userId}');
+      print('   Service: ${booking.service.name}');
+      print('   Service ID: ${booking.service.id}');
+      print('   Service Provider ID: ${booking.service.providerId}');
+      print('   Date: $bookingDateTime');
+      print('   Prix: ${booking.totalAmount}');
+      print('   Provider ID du booking: ${booking.providerId}');
 
-      if (success) {
-        print('✅ Réservation créée avec succès !');
+      final bookingId = await _bookingService.createBooking(booking);
+
+      if (bookingId != null && bookingId.isNotEmpty) {
+        print('✅ Réservation créée avec succès ! ID: $bookingId');
+
         // Envoyer une notification
-        await _notificationService.notifyBookingConfirmed(
-          user.uid,
-          widget.service.name,
-          booking.id,
-        );
+        try {
+          await _notificationService.notifyBookingConfirmed(
+            user.uid,
+            widget.service.name,
+            bookingId,
+          );
+          print('📱 Notification envoyée');
+        } catch (notificationError) {
+          print('⚠️ Erreur notification: $notificationError');
+          // Ne pas faire échouer la réservation si la notification échoue
+        }
 
         if (mounted) {
           Navigator.of(context).pop(true);
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Réservation créée avec succès !'),
+            SnackBar(
+              content: Text('Réservation créée avec succès ! ID: $bookingId'),
               backgroundColor: Colors.green,
             ),
           );
         }
       } else {
+        print('❌ La création de réservation a échoué (ID null ou vide)');
         throw Exception('Erreur lors de la création de la réservation');
       }
-    } catch (e) {
+    } catch (e, stackTrace) {
+      print('❌ Erreur lors de la création de réservation: $e');
+      print('📚 Stack trace: $stackTrace');
+
+      String errorMessage;
+      if (e.toString().contains('permission')) {
+        errorMessage = 'Erreur de permissions. Vérifiez votre connexion.';
+      } else if (e.toString().contains('network')) {
+        errorMessage = 'Erreur de connexion. Vérifiez votre internet.';
+      } else if (e.toString().contains('Données de réservation invalides')) {
+        errorMessage = 'Les données de réservation sont incorrectes.';
+      } else if (e.toString().contains('Service non disponible')) {
+        errorMessage = 'Ce service n\'est plus disponible à cette date.';
+      } else {
+        errorMessage = 'Erreur: ${e.toString()}';
+      }
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Erreur: $e'), backgroundColor: Colors.red),
+          SnackBar(
+            content: Text(errorMessage),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+          ),
         );
       }
     } finally {

@@ -1,0 +1,72 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Règles pour les utilisateurs
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+      allow read: if request.auth != null; // Permet de lire les profils publics
+    }
+    
+    // Règles pour les services - LECTURE PUBLIQUE
+    match /services/{serviceId} {
+      allow read: if true; // Lecture publique
+      allow write: if request.auth != null; // Permissif pendant le développement
+      allow create: if request.auth != null;
+      allow update: if request.auth != null;
+    }
+    
+    // Règles pour les catégories de services - LECTURE PUBLIQUE
+    match /serviceCategories/{categoryId} {
+      allow read: if true; // Lecture publique
+      allow write: if request.auth != null && request.auth.token.admin == true;
+    }
+    
+    // Règles pour les catégories génériques - LECTURE PUBLIQUE
+    match /categories/{categoryId} {
+      allow read: if true; // Lecture publique
+      allow write: if request.auth != null && request.auth.token.admin == true;
+    }
+    
+    // Règles pour les prestataires - LECTURE PUBLIQUE
+    match /providers/{providerId} {
+      allow read: if true; // Lecture publique
+      allow write: if request.auth != null; // Permissif pendant le développement
+      allow create: if request.auth != null;
+    }
+    
+    // Règles pour les réservations - PERMISSIF PENDANT LE DÉVELOPPEMENT
+    match /bookings/{bookingId} {
+      allow read, write: if request.auth != null; // Permissif pour le développement
+      allow create: if request.auth != null;
+    }
+    
+    // Règles pour les favoris
+    match /favorites/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Règles pour les avis - PERMISSIF PENDANT LE DÉVELOPPEMENT
+    match /reviews/{reviewId} {
+      allow read: if true; // Lecture publique
+      allow write: if request.auth != null; // Permissif pendant le développement
+      allow create: if request.auth != null;
+    }
+    
+    // Règles pour les notifications
+    match /notifications/{notificationId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Règles pour l'audit des réservations
+    match /bookingAudit/{auditId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Règles par défaut pour le développement (à supprimer en production)
+    // ATTENTION: Ces règles permettent l'accès complet pour les tests
+    match /{document=**} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+  }
+}

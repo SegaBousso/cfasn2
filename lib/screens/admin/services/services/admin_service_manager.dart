@@ -1,677 +1,621 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../../../models/models.dart';
-import '../../../../services/admin_category_manager.dart';
+import '../../services/admin_firebase_manager.dart';
+import '../../utils/admin_cache_manager.dart';
 
+/// Gestionnaire des services pour l'administration
+/// Utilise l'architecture unifiée avec cache et Firebase manager
 class AdminServiceManager {
   static final AdminServiceManager _instance = AdminServiceManager._internal();
   factory AdminServiceManager() => _instance;
   AdminServiceManager._internal();
 
-  // Instance Firestore
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final AdminFirebaseManager _firebase = AdminFirebaseManager();
+  final AdminCacheManager _cache = AdminCacheManager();
   final String _collectionName = 'services';
 
-  // Gestionnaire de catégories
-  final AdminCategoryManager _categoryManager = AdminCategoryManager();
-
-  // Cache local pour les performances
-  List<ServiceModel> _cachedServices = [];
-  DateTime? _lastCacheUpdate;
-  final Duration _cacheTimeout = const Duration(minutes: 5);
-
-  // Getters avec récupération automatique des données
+  /// Récupère tous les services
   Future<List<ServiceModel>> get allServices async {
-    await _ensureDataLoaded();
-    return List.unmodifiable(_cachedServices);
+    const cacheKey = AdminCacheKeys.servicesAll;
+    final cached = _cache.get<List<ServiceModel>>(cacheKey);
+    if (cached != null) return cached;
+
+    final docs = await _firebase.getDocuments(
+      _collectionName,
+      sorts: [QuerySort(field: 'createdAt', descending: true)],
+      cacheKey: cacheKey,
+    );
+
+    final services = docs.map((doc) {
+      final data = doc.data() as Map<String, dynamic>;
+      return ServiceModel.fromMap(data, doc.id);
+    }).toList();
+
+    return services;
   }
 
+  /// Récupère les services actifs
   Future<List<ServiceModel>> get activeServices async {
-    await _ensureDataLoaded();
-    return _cachedServices.where((s) => s.isActive).toList();
+    const cacheKey = AdminCacheKeys.servicesActive;
+
+    // Bypass temporaire du cache pour éviter le problème de cast
+    // final cached = _cache.get<List<ServiceModel>>(cacheKey);
+    // if (cached != null) return cached;
+
+    final docs = await _firebase.getDocuments(
+      _collectionName,
+      filters: [
+        QueryFilter(
+          field: 'isActive',
+          operator: FilterOperator.isEqualTo,
+          value: true,
+        ),
+      ],
+      sorts: [QuerySort(field: 'createdAt', descending: true)],
+      // Pas de cacheKey pour éviter le problème
+    );
+
+    final services = docs.map((doc) {
+      final data = doc.data() as Map<String, dynamic>;
+      return ServiceModel.fromMap(data, doc.id);
+    }).toList();
+
+    // Mettre en cache manuellement avec le bon type
+    _cache.set(cacheKey, services);
+
+    return services;
   }
 
+  /// Récupère les services inactifs
   Future<List<ServiceModel>> get inactiveServices async {
-    await _ensureDataLoaded();
-    return _cachedServices.where((s) => !s.isActive).toList();
+    const cacheKey = 'services_inactive';
+    final cached = _cache.get<List<ServiceModel>>(cacheKey);
+    if (cached != null) return cached;
+
+    final docs = await _firebase.getDocuments(
+      _collectionName,
+      filters: [
+        QueryFilter(
+          field: 'isActive',
+          operator: FilterOperator.isEqualTo,
+          value: false,
+        ),
+      ],
+      sorts: [QuerySort(field: 'createdAt', descending: true)],
+      cacheKey: cacheKey,
+    );
+
+    final services = docs.map((doc) {
+      final data = doc.data() as Map<String, dynamic>;
+      return ServiceModel.fromMap(data, doc.id);
+    }).toList();
+
+    return services;
   }
 
+  /// Récupère les services disponibles
   Future<List<ServiceModel>> get availableServices async {
-    await _ensureDataLoaded();
-    return _cachedServices.where((s) => s.isAvailable).toList();
-  }
+    const cacheKey = AdminCacheKeys.servicesAvailable;
+    final cached = _cache.get<List<ServiceModel>>(cacheKey);
+    if (cached != null) return cached;
 
-  // Statistiques
-  Future<int> get totalServicesCount async {
-    await _ensureDataLoaded();
-    return _cachedServices.length;
-  }
-
-  Future<int> get activeServicesCount async {
-    final active = await activeServices;
-    return active.length;
-  }
-
-  Future<int> get availableServicesCount async {
-    final available = await availableServices;
-    return available.length;
-  }
-
-  Future<double> get averageRating async {
-    await _ensureDataLoaded();
-    if (_cachedServices.isEmpty) return 0.0;
-    final total = _cachedServices.fold<double>(
-      0.0,
-      (sum, service) => sum + service.rating,
+    final docs = await _firebase.getDocuments(
+      _collectionName,
+      filters: [
+        QueryFilter(
+          field: 'isActive',
+          operator: FilterOperator.isEqualTo,
+          value: true,
+        ),
+        QueryFilter(
+          field: 'isAvailable',
+          operator: FilterOperator.isEqualTo,
+          value: true,
+        ),
+      ],
+      sorts: [QuerySort(field: 'createdAt', descending: true)],
+      cacheKey: cacheKey,
     );
-    return total / _cachedServices.length;
+
+    final services = docs.map((doc) {
+      final data = doc.data() as Map<String, dynamic>;
+      return ServiceModel.fromMap(data, doc.id);
+    }).toList();
+
+    return services;
   }
 
-  // Méthodes synchrones pour la compatibilité (utilisent le cache)
-  List<ServiceModel> get allServicesSync => List.unmodifiable(_cachedServices);
-  List<ServiceModel> get activeServicesSync =>
-      _cachedServices.where((s) => s.isActive).toList();
-  List<ServiceModel> get inactiveServicesSync =>
-      _cachedServices.where((s) => !s.isActive).toList();
-  List<ServiceModel> get availableServicesSync =>
-      _cachedServices.where((s) => s.isAvailable).toList();
-  int get totalServicesCountSync => _cachedServices.length;
-  int get activeServicesCountSync => activeServicesSync.length;
-  int get availableServicesCountSync => availableServicesSync.length;
-  double get averageRatingSync {
-    if (_cachedServices.isEmpty) return 0.0;
-    final total = _cachedServices.fold<double>(
-      0.0,
-      (sum, service) => sum + service.rating,
-    );
-    return total / _cachedServices.length;
-  }
-
-  // Initialisation et gestion du cache
-  Future<void> _ensureDataLoaded() async {
-    if (_cachedServices.isEmpty || _isCacheExpired()) {
-      await _loadServicesFromFirestore();
-    }
-  }
-
-  bool _isCacheExpired() {
-    if (_lastCacheUpdate == null) return true;
-    return DateTime.now().difference(_lastCacheUpdate!) > _cacheTimeout;
-  }
-
-  Future<void> _loadServicesFromFirestore() async {
-    try {
-      final querySnapshot = await _firestore.collection(_collectionName).get();
-
-      _cachedServices = querySnapshot.docs.map((doc) {
-        final data = doc.data();
-        return ServiceModel.fromFirestore(data, doc.id);
-      }).toList();
-
-      _lastCacheUpdate = DateTime.now();
-
-      // Si aucun service n'existe, créer des services par défaut
-      if (_cachedServices.isEmpty) {
-        await _createDefaultServices();
-      }
-    } catch (e) {
-      print('Erreur lors du chargement des services: $e');
-      // En cas d'erreur, garder une liste vide
-      _cachedServices = [];
-      _lastCacheUpdate = DateTime.now();
-    }
-  }
-
-  // CRUD Operations avec Firestore
-
-  /// Créer un nouveau service
-  Future<ServiceModel> createService(ServiceModel service) async {
-    try {
-      // Générer un nouvel ID si nécessaire
-      final newService = service.copyWith(
-        id: service.id.isEmpty ? _generateId() : service.id,
-        createdAt: service.createdAt,
-        updatedAt: DateTime.now(),
-      );
-
-      // Sauvegarder dans Firestore
-      await _firestore
-          .collection(_collectionName)
-          .doc(newService.id)
-          .set(newService.toFirestore());
-
-      // Mettre à jour le cache
-      _cachedServices.add(newService);
-      _lastCacheUpdate = DateTime.now();
-
-      return newService;
-    } catch (e) {
-      throw Exception('Erreur lors de la création du service: $e');
-    }
-  }
-
-  /// Mettre à jour un service existant
-  Future<ServiceModel> updateService(ServiceModel service) async {
-    try {
-      final updatedService = service.copyWith(updatedAt: DateTime.now());
-
-      // Mettre à jour dans Firestore
-      await _firestore
-          .collection(_collectionName)
-          .doc(service.id)
-          .update(updatedService.toFirestore());
-
-      // Mettre à jour le cache
-      final index = _cachedServices.indexWhere((s) => s.id == service.id);
-      if (index != -1) {
-        _cachedServices[index] = updatedService;
-      }
-      _lastCacheUpdate = DateTime.now();
-
-      return updatedService;
-    } catch (e) {
-      throw Exception('Erreur lors de la mise à jour du service: $e');
-    }
-  }
-
-  /// Supprimer un service
-  Future<bool> deleteService(String serviceId) async {
-    try {
-      // Supprimer de Firestore
-      await _firestore.collection(_collectionName).doc(serviceId).delete();
-
-      // Mettre à jour le cache
-      final initialLength = _cachedServices.length;
-      _cachedServices.removeWhere((s) => s.id == serviceId);
-      _lastCacheUpdate = DateTime.now();
-
-      return _cachedServices.length < initialLength;
-    } catch (e) {
-      throw Exception('Erreur lors de la suppression du service: $e');
-    }
-  }
-
-  /// Supprimer plusieurs services
-  Future<int> deleteServices(List<String> serviceIds) async {
-    try {
-      int deletedCount = 0;
-      final batch = _firestore.batch();
-
-      // Préparer la suppression en batch
-      for (final id in serviceIds) {
-        batch.delete(_firestore.collection(_collectionName).doc(id));
-      }
-
-      // Exécuter le batch
-      await batch.commit();
-
-      // Mettre à jour le cache
-      for (final id in serviceIds) {
-        final initialLength = _cachedServices.length;
-        _cachedServices.removeWhere((s) => s.id == id);
-        if (_cachedServices.length < initialLength) {
-          deletedCount++;
-        }
-      }
-      _lastCacheUpdate = DateTime.now();
-
-      return deletedCount;
-    } catch (e) {
-      throw Exception('Erreur lors de la suppression des services: $e');
-    }
-  }
-
-  /// Changer le statut d'un service (actif/inactif)
-  Future<ServiceModel> toggleServiceStatus(String serviceId) async {
-    try {
-      final service = await getServiceById(serviceId);
-      if (service == null) {
-        throw Exception('Service non trouvé');
-      }
-
-      final updatedService = service.copyWith(
-        isActive: !service.isActive,
-        updatedAt: DateTime.now(),
-      );
-
-      // Mettre à jour dans Firestore
-      await _firestore.collection(_collectionName).doc(serviceId).update({
-        'isActive': updatedService.isActive,
-        'updatedAt': updatedService.updatedAt,
-      });
-
-      // Mettre à jour le cache
-      final index = _cachedServices.indexWhere((s) => s.id == serviceId);
-      if (index != -1) {
-        _cachedServices[index] = updatedService;
-      }
-      _lastCacheUpdate = DateTime.now();
-
-      return updatedService;
-    } catch (e) {
-      throw Exception('Erreur lors du changement de statut: $e');
-    }
-  }
-
-  /// Changer la disponibilité d'un service
-  Future<ServiceModel> toggleServiceAvailability(String serviceId) async {
-    try {
-      final service = await getServiceById(serviceId);
-      if (service == null) {
-        throw Exception('Service non trouvé');
-      }
-
-      final updatedService = service.copyWith(
-        isAvailable: !service.isAvailable,
-        updatedAt: DateTime.now(),
-      );
-
-      // Mettre à jour dans Firestore
-      await _firestore.collection(_collectionName).doc(serviceId).update({
-        'isAvailable': updatedService.isAvailable,
-        'updatedAt': updatedService.updatedAt,
-      });
-
-      // Mettre à jour le cache
-      final index = _cachedServices.indexWhere((s) => s.id == serviceId);
-      if (index != -1) {
-        _cachedServices[index] = updatedService;
-      }
-      _lastCacheUpdate = DateTime.now();
-
-      return updatedService;
-    } catch (e) {
-      throw Exception('Erreur lors du changement de disponibilité: $e');
-    }
-  }
-
-  /// Actions en lot
-  Future<List<ServiceModel>> bulkActivateServices(
-    List<String> serviceIds,
-  ) async {
-    try {
-      final batch = _firestore.batch();
-      final updatedServices = <ServiceModel>[];
-
-      for (final id in serviceIds) {
-        batch.update(_firestore.collection(_collectionName).doc(id), {
-          'isActive': true,
-          'updatedAt': DateTime.now(),
-        });
-
-        // Mettre à jour le cache
-        final index = _cachedServices.indexWhere((s) => s.id == id);
-        if (index != -1) {
-          final updatedService = _cachedServices[index].copyWith(
-            isActive: true,
-            updatedAt: DateTime.now(),
-          );
-          _cachedServices[index] = updatedService;
-          updatedServices.add(updatedService);
-        }
-      }
-
-      await batch.commit();
-      _lastCacheUpdate = DateTime.now();
-
-      return updatedServices;
-    } catch (e) {
-      throw Exception('Erreur lors de l\'activation des services: $e');
-    }
-  }
-
-  Future<List<ServiceModel>> bulkDeactivateServices(
-    List<String> serviceIds,
-  ) async {
-    try {
-      final batch = _firestore.batch();
-      final updatedServices = <ServiceModel>[];
-
-      for (final id in serviceIds) {
-        batch.update(_firestore.collection(_collectionName).doc(id), {
-          'isActive': false,
-          'updatedAt': DateTime.now(),
-        });
-
-        // Mettre à jour le cache
-        final index = _cachedServices.indexWhere((s) => s.id == id);
-        if (index != -1) {
-          final updatedService = _cachedServices[index].copyWith(
-            isActive: false,
-            updatedAt: DateTime.now(),
-          );
-          _cachedServices[index] = updatedService;
-          updatedServices.add(updatedService);
-        }
-      }
-
-      await batch.commit();
-      _lastCacheUpdate = DateTime.now();
-
-      return updatedServices;
-    } catch (e) {
-      throw Exception('Erreur lors de la désactivation des services: $e');
-    }
-  }
-
-  // Recherche et filtrage
-  Future<List<ServiceModel>> searchServices({
-    String? query,
-    String? categoryId,
-    bool? isActive,
-    bool? isAvailable,
-  }) async {
-    await _ensureDataLoaded();
-    var filteredServices = _cachedServices.toList();
-
-    // Filtrer par requête de recherche
-    if (query != null && query.isNotEmpty) {
-      final lowercaseQuery = query.toLowerCase();
-      filteredServices = filteredServices.where((service) {
-        return service.name.toLowerCase().contains(lowercaseQuery) ||
-            service.description.toLowerCase().contains(lowercaseQuery) ||
-            service.categoryName.toLowerCase().contains(lowercaseQuery) ||
-            service.tags.any(
-              (tag) => tag.toLowerCase().contains(lowercaseQuery),
-            );
-      }).toList();
-    }
-
-    // Filtrer par catégorie
-    if (categoryId != null && categoryId.isNotEmpty && categoryId != 'all') {
-      filteredServices = filteredServices.where((service) {
-        return service.categoryId == categoryId;
-      }).toList();
-    }
-
-    // Filtrer par statut actif
-    if (isActive != null) {
-      filteredServices = filteredServices.where((service) {
-        return service.isActive == isActive;
-      }).toList();
-    }
-
-    // Filtrer par disponibilité
-    if (isAvailable != null) {
-      filteredServices = filteredServices.where((service) {
-        return service.isAvailable == isAvailable;
-      }).toList();
-    }
-
-    return filteredServices;
-  }
-
-  /// Obtenir un service par son ID
+  /// Récupère un service par ID
   Future<ServiceModel?> getServiceById(String id) async {
-    await _ensureDataLoaded();
+    final cacheKey = AdminCacheKeys.serviceById(id);
+    final cached = _cache.get<ServiceModel>(cacheKey);
+    if (cached != null) return cached;
+
     try {
-      return _cachedServices.firstWhere((service) => service.id == id);
+      final doc = await FirebaseFirestore.instance
+          .collection(_collectionName)
+          .doc(id)
+          .get();
+
+      if (!doc.exists) return null;
+
+      final data = doc.data() as Map<String, dynamic>;
+      final service = ServiceModel.fromMap(data, doc.id);
+
+      _cache.set(cacheKey, service);
+      return service;
     } catch (e) {
+      print('❌ Erreur lors de la récupération du service: $e');
       return null;
     }
   }
 
-  /// Obtenir les services par catégorie
+  /// Récupère les services par catégorie
   Future<List<ServiceModel>> getServicesByCategory(String categoryId) async {
-    await _ensureDataLoaded();
-    return _cachedServices
-        .where((service) => service.categoryId == categoryId)
-        .toList();
-  }
+    final cacheKey = 'services_category_$categoryId';
+    final cached = _cache.get<List<ServiceModel>>(cacheKey);
+    if (cached != null) return cached;
 
-  /// Obtenir les catégories avec le nombre de services
-  Future<List<Map<String, dynamic>>> getCategoriesWithCount() async {
-    await _ensureDataLoaded();
-
-    try {
-      final categories = await _categoryManager.getCategories();
-      return categories.map((category) {
-        final count = _cachedServices
-            .where((service) => service.categoryId == category.id)
-            .length;
-        return {
-          'id': category.id,
-          'name': category.name,
-          'count': count,
-          'color': category.color.value,
-          'icon': category.iconName,
-        };
-      }).toList();
-    } catch (e) {
-      print('Erreur lors de la récupération des catégories: $e');
-      return [];
-    }
-  }
-
-  /// Obtenir toutes les catégories
-  Future<List<CategoryModel>> getCategories() async {
-    return await _categoryManager.getCategories();
-  }
-
-  /// Obtenir les catégories actives
-  Future<List<CategoryModel>> getActiveCategories() async {
-    return await _categoryManager.getActiveCategories();
-  }
-
-  // Utilitaires
-  String _generateId() {
-    return _firestore.collection(_collectionName).doc().id;
-  }
-
-  /// Forcer le rechargement des données
-  Future<void> refreshData() async {
-    _lastCacheUpdate = null;
-    _cachedServices.clear();
-    await _loadServicesFromFirestore();
-  }
-
-  /// Exporter les services (format CSV)
-  Future<String> exportServices() async {
-    await _ensureDataLoaded();
-
-    final buffer = StringBuffer();
-    buffer.writeln(
-      'ID,Nom,Description,Prix,Catégorie,Note,Avis,Actif,Disponible,Créé le,Modifié le',
+    final docs = await _firebase.getDocuments(
+      _collectionName,
+      filters: [
+        QueryFilter(
+          field: 'categoryId',
+          operator: FilterOperator.isEqualTo,
+          value: categoryId,
+        ),
+      ],
+      sorts: [QuerySort(field: 'createdAt', descending: true)],
+      cacheKey: cacheKey,
     );
 
-    for (final service in _cachedServices) {
-      buffer.writeln(
-        [
-          service.id,
-          '"${service.name}"',
-          '"${service.description.replaceAll('"', '""')}"',
-          service.price,
-          service.categoryName,
-          service.rating,
-          service.totalReviews,
-          service.isActive ? 'Oui' : 'Non',
-          service.isAvailable ? 'Oui' : 'Non',
-          _formatDate(service.createdAt),
-          _formatDate(service.updatedAt),
-        ].join(','),
-      );
-    }
+    final services = docs.map((doc) {
+      final data = doc.data() as Map<String, dynamic>;
+      return ServiceModel.fromMap(data, doc.id);
+    }).toList();
 
-    return buffer.toString();
+    return services;
   }
 
-  String _formatDate(DateTime date) {
-    return '${date.day.toString().padLeft(2, '0')}/'
-        '${date.month.toString().padLeft(2, '0')}/'
-        '${date.year}';
+  /// Récupère les services par prestataire
+  Future<List<ServiceModel>> getServicesByProvider(String providerId) async {
+    final cacheKey = 'services_provider_$providerId';
+    final cached = _cache.get<List<ServiceModel>>(cacheKey);
+    if (cached != null) return cached;
+
+    final docs = await _firebase.getDocuments(
+      _collectionName,
+      filters: [
+        QueryFilter(
+          field: 'providerId',
+          operator: FilterOperator.isEqualTo,
+          value: providerId,
+        ),
+      ],
+      sorts: [QuerySort(field: 'createdAt', descending: true)],
+      cacheKey: cacheKey,
+    );
+
+    final services = docs.map((doc) {
+      final data = doc.data() as Map<String, dynamic>;
+      return ServiceModel.fromMap(data, doc.id);
+    }).toList();
+
+    return services;
   }
 
-  /// Créer des services par défaut si la base est vide
-  Future<void> _createDefaultServices() async {
-    // S'assurer que les catégories par défaut existent
-    await _categoryManager.initializeDefaultCategories();
+  /// Crée un nouveau service
+  Future<void> createService(ServiceModel service) async {
+    try {
+      final docRef = FirebaseFirestore.instance
+          .collection(_collectionName)
+          .doc(service.id.isEmpty ? null : service.id);
 
-    final categories = await _categoryManager.getCategories();
-    if (categories.isEmpty) {
-      print('Aucune catégorie disponible pour créer les services par défaut');
-      return;
+      final serviceData = service.toMap();
+      serviceData['createdAt'] = FieldValue.serverTimestamp();
+      serviceData['updatedAt'] = FieldValue.serverTimestamp();
+
+      final operation = BatchOperation.create(docRef, serviceData);
+      await _firebase.executeBatch([operation]);
+
+      // Invalider le cache
+      _cache.clearByPrefix('services_');
+
+      print('✅ Service créé avec succès');
+    } catch (e) {
+      print('❌ Erreur lors de la création du service: $e');
+      rethrow;
     }
-
-    final defaultServices = await _getDefaultServices(categories);
-
-    final batch = _firestore.batch();
-    for (final service in defaultServices) {
-      batch.set(
-        _firestore.collection(_collectionName).doc(service.id),
-        service.toFirestore(),
-      );
-    }
-
-    await batch.commit();
-    _cachedServices = defaultServices;
-    _lastCacheUpdate = DateTime.now();
   }
 
-  Future<List<ServiceModel>> _getDefaultServices(
-    List<CategoryModel> categories,
+  /// Met à jour un service
+  Future<void> updateService(ServiceModel service) async {
+    try {
+      final docRef = FirebaseFirestore.instance
+          .collection(_collectionName)
+          .doc(service.id);
+
+      final serviceData = service.toMap();
+      serviceData['updatedAt'] = FieldValue.serverTimestamp();
+
+      final operation = BatchOperation.update(docRef, serviceData);
+      await _firebase.executeBatch([operation]);
+
+      // Mettre à jour le cache
+      _cache.clearByPrefix('services_');
+      _cache.set(AdminCacheKeys.serviceById(service.id), service);
+
+      print('✅ Service mis à jour avec succès');
+    } catch (e) {
+      print('❌ Erreur lors de la mise à jour du service: $e');
+      rethrow;
+    }
+  }
+
+  /// Supprime un service
+  Future<void> deleteService(String id) async {
+    try {
+      final docRef = FirebaseFirestore.instance
+          .collection(_collectionName)
+          .doc(id);
+
+      final operation = BatchOperation.delete(docRef);
+      await _firebase.executeBatch([operation]);
+
+      // Invalider le cache
+      _cache.clearByPrefix('services_');
+
+      print('✅ Service supprimé avec succès');
+    } catch (e) {
+      print('❌ Erreur lors de la suppression du service: $e');
+      rethrow;
+    }
+  }
+
+  /// Supprime plusieurs services
+  Future<void> deleteMultipleServices(List<String> serviceIds) async {
+    try {
+      final operations = serviceIds.map((id) {
+        final docRef = FirebaseFirestore.instance
+            .collection(_collectionName)
+            .doc(id);
+        return BatchOperation.delete(docRef);
+      }).toList();
+
+      await _firebase.executeBatch(operations);
+
+      // Invalider le cache
+      _cache.clearByPrefix('services_');
+
+      print('✅ ${serviceIds.length} services supprimés avec succès');
+    } catch (e) {
+      print('❌ Erreur lors de la suppression des services: $e');
+      rethrow;
+    }
+  }
+
+  /// Met à jour le statut actif de plusieurs services
+  Future<void> bulkUpdateActiveStatus(
+    List<String> serviceIds,
+    bool isActive,
   ) async {
-    // Créer une map pour accéder facilement aux catégories par nom
-    final categoryMap = {for (var cat in categories) cat.name: cat};
+    try {
+      final operations = serviceIds.map((id) {
+        final docRef = FirebaseFirestore.instance
+            .collection(_collectionName)
+            .doc(id);
+        return BatchOperation.update(docRef, {
+          'isActive': isActive,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }).toList();
 
-    final services = <ServiceModel>[];
+      await _firebase.executeBatch(operations);
 
-    // Nettoyage
-    if (categoryMap.containsKey('Nettoyage')) {
-      final cat = categoryMap['Nettoyage']!;
-      services.add(
-        ServiceModel(
-          id: 'default_1',
-          name: 'Nettoyage de bureaux',
-          description:
-              'Service de nettoyage professionnel pour bureaux et espaces commerciaux.',
-          price: 80.0,
-          categoryId: cat.id,
-          categoryName: cat.name,
-          rating: 4.5,
-          totalReviews: 23,
-          isAvailable: true,
-          isActive: true,
-          createdAt: DateTime.now().subtract(const Duration(days: 30)),
-          updatedAt: DateTime.now().subtract(const Duration(days: 1)),
-          createdBy: 'admin',
-          tags: ['bureau', 'professionnel', 'commercial'],
+      // Invalider le cache
+      _cache.clearByPrefix('services_');
+
+      print('✅ ${serviceIds.length} services mis à jour avec succès');
+    } catch (e) {
+      print('❌ Erreur lors de la mise à jour des services: $e');
+      rethrow;
+    }
+  }
+
+  /// Recherche des services
+  Future<List<ServiceModel>> searchServices(String query) async {
+    if (query.isEmpty) return await allServices;
+
+    // Pour une recherche simple, on récupère tous les services et on filtre
+    final services = await allServices;
+    final lowercaseQuery = query.toLowerCase();
+
+    return services.where((service) {
+      return service.name.toLowerCase().contains(lowercaseQuery) ||
+          service.description.toLowerCase().contains(lowercaseQuery) ||
+          service.categoryName.toLowerCase().contains(lowercaseQuery);
+    }).toList();
+  }
+
+  /// Filtre les services avec critères avancés
+  Future<List<ServiceModel>> filterServices({
+    String? categoryId,
+    String? providerId,
+    bool? isActive,
+    bool? isAvailable,
+    double? minPrice,
+    double? maxPrice,
+    double? minRating,
+  }) async {
+    // Construire les filtres Firestore
+    final filters = <QueryFilter>[];
+
+    if (categoryId != null) {
+      filters.add(
+        QueryFilter(
+          field: 'categoryId',
+          operator: FilterOperator.isEqualTo,
+          value: categoryId,
         ),
       );
     }
 
-    // Réparation
-    if (categoryMap.containsKey('Réparation')) {
-      final cat = categoryMap['Réparation']!;
-      services.add(
-        ServiceModel(
-          id: 'default_2',
-          name: 'Réparation plomberie',
-          description: 'Intervention rapide pour tous problèmes de plomberie.',
-          price: 120.0,
-          categoryId: cat.id,
-          categoryName: cat.name,
-          rating: 4.8,
-          totalReviews: 45,
-          isAvailable: false,
-          isActive: true,
-          createdAt: DateTime.now().subtract(const Duration(days: 15)),
-          updatedAt: DateTime.now().subtract(const Duration(hours: 2)),
-          createdBy: 'admin',
-          tags: ['plomberie', 'urgence', 'domicile'],
+    if (providerId != null) {
+      filters.add(
+        QueryFilter(
+          field: 'providerId',
+          operator: FilterOperator.isEqualTo,
+          value: providerId,
         ),
       );
     }
 
-    // Éducation
-    if (categoryMap.containsKey('Éducation')) {
-      final cat = categoryMap['Éducation']!;
-      services.add(
-        ServiceModel(
-          id: 'default_3',
-          name: 'Cours de guitare',
-          description: 'Cours particuliers de guitare pour tous niveaux.',
-          price: 50.0,
-          categoryId: cat.id,
-          categoryName: cat.name,
-          rating: 4.9,
-          totalReviews: 67,
-          isAvailable: true,
-          isActive: false,
-          createdAt: DateTime.now().subtract(const Duration(days: 60)),
-          updatedAt: DateTime.now().subtract(const Duration(days: 5)),
-          createdBy: 'admin',
-          tags: ['musique', 'cours', 'particulier'],
+    if (isActive != null) {
+      filters.add(
+        QueryFilter(
+          field: 'isActive',
+          operator: FilterOperator.isEqualTo,
+          value: isActive,
         ),
       );
     }
 
-    // Santé
-    if (categoryMap.containsKey('Santé')) {
-      final cat = categoryMap['Santé']!;
-      services.add(
-        ServiceModel(
-          id: 'default_4',
-          name: 'Massage relaxant',
-          description:
-              'Séance de massage relaxant à domicile par un professionnel certifié.',
-          price: 75.0,
-          categoryId: cat.id,
-          categoryName: cat.name,
-          rating: 4.7,
-          totalReviews: 32,
-          isAvailable: true,
-          isActive: true,
-          createdAt: DateTime.now().subtract(const Duration(days: 20)),
-          updatedAt: DateTime.now().subtract(const Duration(days: 3)),
-          createdBy: 'admin',
-          tags: ['massage', 'relaxation', 'domicile', 'bien-être'],
+    if (isAvailable != null) {
+      filters.add(
+        QueryFilter(
+          field: 'isAvailable',
+          operator: FilterOperator.isEqualTo,
+          value: isAvailable,
         ),
       );
     }
 
-    // Beauté
-    if (categoryMap.containsKey('Beauté')) {
-      final cat = categoryMap['Beauté']!;
-      services.add(
-        ServiceModel(
-          id: 'default_5',
-          name: 'Coiffure à domicile',
-          description: 'Service de coiffure professionnel à votre domicile.',
-          price: 45.0,
-          categoryId: cat.id,
-          categoryName: cat.name,
-          rating: 4.6,
-          totalReviews: 18,
-          isAvailable: true,
-          isActive: true,
-          createdAt: DateTime.now().subtract(const Duration(days: 10)),
-          updatedAt: DateTime.now().subtract(const Duration(hours: 12)),
-          createdBy: 'admin',
-          tags: ['coiffure', 'domicile', 'beauté'],
+    if (minPrice != null) {
+      filters.add(
+        QueryFilter(
+          field: 'price',
+          operator: FilterOperator.isGreaterThanOrEqualTo,
+          value: minPrice,
         ),
       );
+    }
+
+    if (maxPrice != null) {
+      filters.add(
+        QueryFilter(
+          field: 'price',
+          operator: FilterOperator.isLessThanOrEqualTo,
+          value: maxPrice,
+        ),
+      );
+    }
+
+    final docs = await _firebase.getDocuments(
+      _collectionName,
+      filters: filters,
+      sorts: [QuerySort(field: 'createdAt', descending: true)],
+    );
+
+    var services = docs.map((doc) {
+      final data = doc.data() as Map<String, dynamic>;
+      return ServiceModel.fromMap(data, doc.id);
+    }).toList();
+
+    // Filtres locaux pour les critères qui ne peuvent pas être appliqués dans Firestore
+    if (minRating != null) {
+      services = services
+          .where((service) => service.rating >= minRating)
+          .toList();
     }
 
     return services;
   }
 
-  /// Réinitialiser les données (pour les tests)
-  Future<void> reset() async {
+  /// Obtient les statistiques des services
+  Future<Map<String, dynamic>> getServiceStats() async {
+    const cacheKey = 'services_stats';
+    final cached = _cache.get<Map<String, dynamic>>(cacheKey);
+    if (cached != null) return cached;
+
     try {
-      // Supprimer tous les documents de la collection
-      final querySnapshot = await _firestore.collection(_collectionName).get();
-      final batch = _firestore.batch();
+      // Utiliser le service de statistiques pour des calculs optimisés
+      final results = await Future.wait([
+        _firebase.countDocuments(
+          _collectionName,
+          cacheKey: 'services_count_total',
+        ),
+        _firebase.countDocuments(
+          _collectionName,
+          filters: [
+            QueryFilter(
+              field: 'isActive',
+              operator: FilterOperator.isEqualTo,
+              value: true,
+            ),
+          ],
+          cacheKey: 'services_count_active',
+        ),
+        _firebase.countDocuments(
+          _collectionName,
+          filters: [
+            QueryFilter(
+              field: 'isAvailable',
+              operator: FilterOperator.isEqualTo,
+              value: true,
+            ),
+          ],
+          cacheKey: 'services_count_available',
+        ),
+      ]);
 
-      for (final doc in querySnapshot.docs) {
-        batch.delete(doc.reference);
-      }
+      final stats = {
+        'total': results[0],
+        'active': results[1],
+        'available': results[2],
+        'inactive': results[0] - results[1],
+        'last_updated': DateTime.now().toIso8601String(),
+      };
 
-      await batch.commit();
-
-      // Vider le cache
-      _cachedServices.clear();
-      _lastCacheUpdate = null;
+      _cache.set(cacheKey, stats, timeout: const Duration(minutes: 5));
+      return stats;
     } catch (e) {
-      print('Erreur lors de la réinitialisation: $e');
+      print('❌ Erreur lors du calcul des statistiques: $e');
+      return {};
     }
+  }
+
+  /// Compte total des services
+  Future<int> get totalServicesCount async {
+    return await _firebase.countDocuments(
+      _collectionName,
+      cacheKey: 'services_count_total',
+    );
+  }
+
+  /// Compte des services actifs
+  Future<int> get activeServicesCount async {
+    return await _firebase.countDocuments(
+      _collectionName,
+      filters: [
+        QueryFilter(
+          field: 'isActive',
+          operator: FilterOperator.isEqualTo,
+          value: true,
+        ),
+      ],
+      cacheKey: 'services_count_active',
+    );
+  }
+
+  /// Forcer le rechargement en vidant le cache
+  Future<void> forceReload() async {
+    _cache.clearByPrefix('services_');
+  }
+
+  /// Créer un stream temps réel pour les services
+  Stream<List<ServiceModel>> getServicesStream({
+    List<QueryFilter>? filters,
+    int? limit,
+  }) {
+    return _firebase
+        .createDocumentsStream(
+          _collectionName,
+          filters: filters,
+          sorts: [QuerySort(field: 'createdAt', descending: true)],
+          limit: limit,
+          streamKey: 'services_stream',
+        )
+        .map((docs) {
+          return docs.map((doc) {
+            final data = doc.data() as Map<String, dynamic>;
+            return ServiceModel.fromMap(data, doc.id);
+          }).toList();
+        });
+  }
+
+  /// Nettoie les ressources (streams, etc.)
+  void dispose() {
+    _firebase.closeStream('services_stream');
+  }
+
+  /// Initialiser des données par défaut si nécessaire
+  Future<void> initializeDefaultData() async {
+    final count = await _firebase.countDocuments(_collectionName);
+    if (count == 0) {
+      await _createDefaultServices();
+    }
+  }
+
+  /// Créer des services par défaut pour les tests
+  Future<void> _createDefaultServices() async {
+    final defaultServices = [
+      ServiceModel(
+        id: 'service_001',
+        name: 'Nettoyage de vitres',
+        description:
+            'Service professionnel de nettoyage de vitres pour particuliers et entreprises',
+        categoryId: 'category_001',
+        categoryName: 'Nettoyage',
+        price: 45.0,
+        isActive: true,
+        isAvailable: true,
+        providerId: 'provider_001',
+        providerName: 'Jean Dupont',
+        rating: 4.5,
+        totalReviews: 23,
+        createdAt: DateTime.now().subtract(const Duration(days: 30)),
+        updatedAt: DateTime.now(),
+        createdBy: 'admin',
+      ),
+      ServiceModel(
+        id: 'service_002',
+        name: 'Réparation plomberie',
+        description: 'Dépannage et réparation de plomberie d\'urgence',
+        categoryId: 'category_002',
+        categoryName: 'Plomberie',
+        price: 80.0,
+        isActive: true,
+        isAvailable: true,
+        providerId: 'provider_002',
+        providerName: 'Marie Martin',
+        rating: 4.8,
+        totalReviews: 45,
+        createdAt: DateTime.now().subtract(const Duration(days: 20)),
+        updatedAt: DateTime.now(),
+        createdBy: 'admin',
+      ),
+      ServiceModel(
+        id: 'service_003',
+        name: 'Jardinage et entretien',
+        description: 'Entretien de jardins, taille de haies, tonte de pelouse',
+        categoryId: 'category_003',
+        categoryName: 'Jardinage',
+        price: 35.0,
+        isActive: true,
+        isAvailable: false,
+        providerId: 'provider_003',
+        providerName: 'Pierre Durand',
+        rating: 4.2,
+        totalReviews: 18,
+        createdAt: DateTime.now().subtract(const Duration(days: 15)),
+        updatedAt: DateTime.now(),
+        createdBy: 'admin',
+      ),
+    ];
+
+    // Créer les opérations batch
+    final operations = defaultServices.map((service) {
+      final docRef = FirebaseFirestore.instance
+          .collection(_collectionName)
+          .doc(service.id);
+      return BatchOperation.create(docRef, service.toMap());
+    }).toList();
+
+    await _firebase.executeBatch(operations);
+
+    // Invalider le cache pour forcer le rechargement
+    _cache.clearByPrefix('services_');
+
+    print('✅ Services par défaut créés avec succès');
   }
 }

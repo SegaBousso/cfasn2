@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:service/models/service_model.dart';
 import '../services/services_service.dart';
 
 class ServicesDialogs {

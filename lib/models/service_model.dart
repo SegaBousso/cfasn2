@@ -1,4 +1,20 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
+
+/// Classe pour représenter une catégorie de service
+class ServiceCategory {
+  final String id;
+  final String name;
+  final IconData icon;
+  final int servicesCount;
+
+  ServiceCategory({
+    required this.id,
+    required this.name,
+    required this.icon,
+    required this.servicesCount,
+  });
+}
 
 class ServiceModel {
   final String id;

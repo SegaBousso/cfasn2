@@ -35,6 +35,8 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _loadServices() async {
+    if (!mounted) return;
+
     setState(() {
       _isLoading = true;
     });
@@ -45,10 +47,11 @@ class _HomeScreenState extends State<HomeScreen> {
       );
       final recentServices = await _serviceManager.getRecentServices(limit: 10);
       final allServices = await _serviceManager.getActiveServices();
-      
+
       // Calculer le nombre de catégories uniques
       final uniqueCategories = allServices.map((s) => s.categoryId).toSet();
 
+      if (!mounted) return;
       setState(() {
         _popularServices = popularServices;
         _recentServices = recentServices;
@@ -59,13 +62,26 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       print('Erreur lors du chargement des services: $e');
       // Fallback vers les données mock en cas d'erreur
-      setState(() {
-        _popularServices = MockDataService.getMockServices();
-        _recentServices = MockDataService.getMockServices();
-        _totalServices = MockDataService.getMockServices().length;
-        _totalCategories = 3; // Nombre par défaut
-        _isLoading = false;
-      });
+      if (!mounted) return;
+      try {
+        final mockServices = await MockDataService.getMockServices();
+        setState(() {
+          _popularServices = mockServices;
+          _recentServices = mockServices;
+          _totalServices = mockServices.length;
+          _totalCategories = 3; // Nombre par défaut
+          _isLoading = false;
+        });
+      } catch (mockError) {
+        // En cas d'erreur même avec les mocks, utiliser des listes vides
+        setState(() {
+          _popularServices = [];
+          _recentServices = [];
+          _totalServices = 0;
+          _totalCategories = 0;
+          _isLoading = false;
+        });
+      }
     }
   }
 
@@ -260,5 +276,11 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    // Nettoyer les ressources si nécessaire
+    super.dispose();
   }
 }
